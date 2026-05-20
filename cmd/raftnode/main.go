@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/example/sna-project/internal/config"
-	"github.com/example/sna-project/internal/raft"
+	"github.com/RishatShay/sna-final-project/internal/config"
+	"github.com/RishatShay/sna-final-project/internal/raft"
 )
 
 func main() {

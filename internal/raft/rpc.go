@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/example/sna-project/internal/storage"
-	"github.com/example/sna-project/internal/wire"
+	"github.com/RishatShay/sna-final-project/internal/storage"
+	"github.com/RishatShay/sna-final-project/internal/wire"
 )
 
 func (n *Node) RequestVote(_ context.Context, req *wire.RequestVoteRequest) (*wire.RequestVoteResponse, error) {

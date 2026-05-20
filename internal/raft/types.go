@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/example/sna-project/internal/config"
+	"github.com/RishatShay/sna-final-project/internal/config"
 )
 
 type Role string

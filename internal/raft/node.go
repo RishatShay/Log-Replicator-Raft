@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/example/sna-project/internal/logging"
-	"github.com/example/sna-project/internal/metrics"
-	"github.com/example/sna-project/internal/storage"
-	"github.com/example/sna-project/internal/wire"
+	"github.com/RishatShay/sna-final-project/internal/logging"
+	"github.com/RishatShay/sna-final-project/internal/metrics"
+	"github.com/RishatShay/sna-final-project/internal/storage"
+	"github.com/RishatShay/sna-final-project/internal/wire"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

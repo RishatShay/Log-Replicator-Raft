@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/example/sna-project/internal/wire"
+	"github.com/RishatShay/sna-final-project/internal/wire"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

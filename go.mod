@@ -1,4 +1,4 @@
-module github.com/example/sna-project
+module github.com/RishatShay/sna-final-project
 
 go 1.24.0
 

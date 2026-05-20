@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package raft.v1;
 
-option go_package = "github.com/example/sna-project/internal/wire;wire";
+option go_package = "github.com/RishatShay/sna-final-project/internal/wire;wire";
 
 message LogEntry {
   uint64 index = 1;
