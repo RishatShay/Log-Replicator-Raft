@@ -7,14 +7,15 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/RishatShay/sna-final-project/internal/logging"
 	"github.com/RishatShay/sna-final-project/internal/metrics"
+	"github.com/RishatShay/sna-final-project/internal/raftpb"
 	"github.com/RishatShay/sna-final-project/internal/storage"
-	"github.com/RishatShay/sna-final-project/internal/wire"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -27,8 +28,8 @@ const (
 )
 
 type Node struct {
-	wire.UnimplementedRaftServiceServer
-	wire.UnimplementedClientServiceServer
+	raftpb.UnimplementedRaftServiceServer
+	raftpb.UnimplementedClientServiceServer
 
 	mu sync.Mutex
 
@@ -60,8 +61,8 @@ type Node struct {
 	grpcServer *grpc.Server
 	httpServer *http.Server
 	conns      map[string]*grpc.ClientConn
-	clients    map[string]wire.RaftServiceClient
-	apiClients map[string]wire.ClientServiceClient
+	clients    map[string]raftpb.RaftServiceClient
+	apiClients map[string]raftpb.ClientServiceClient
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -122,8 +123,8 @@ func New(opts Options) (*Node, error) {
 		heartbeatInterval: opts.HeartbeatInterval,
 		snapshotThreshold: opts.SnapshotThreshold,
 		conns:             map[string]*grpc.ClientConn{},
-		clients:           map[string]wire.RaftServiceClient{},
-		apiClients:        map[string]wire.ClientServiceClient{},
+		clients:           map[string]raftpb.RaftServiceClient{},
+		apiClients:        map[string]raftpb.ClientServiceClient{},
 		stop:              make(chan struct{}),
 	}
 	node.resetElectionDeadlineLocked()
@@ -134,14 +135,14 @@ func New(opts Options) (*Node, error) {
 func (n *Node) Start() error {
 	n.mu.Lock()
 	for _, peer := range n.peers {
-		conn, err := grpc.NewClient(wire.DialTarget(peer.Address), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(dialTarget(peer.Address), grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			n.mu.Unlock()
 			return err
 		}
 		n.conns[peer.ID] = conn
-		n.clients[peer.ID] = wire.NewRaftServiceClient(conn)
-		n.apiClients[peer.ID] = wire.NewClientServiceClient(conn)
+		n.clients[peer.ID] = raftpb.NewRaftServiceClient(conn)
+		n.apiClients[peer.ID] = raftpb.NewClientServiceClient(conn)
 	}
 	n.mu.Unlock()
 
@@ -150,8 +151,8 @@ func (n *Node) Start() error {
 		return err
 	}
 	n.grpcServer = grpc.NewServer()
-	wire.RegisterRaftServiceServer(n.grpcServer, n)
-	wire.RegisterClientServiceServer(n.grpcServer, n)
+	raftpb.RegisterRaftServiceServer(n.grpcServer, n)
+	raftpb.RegisterClientServiceServer(n.grpcServer, n)
 	go func() {
 		n.logger.Info("grpc server started", map[string]any{"addr": n.grpcAddr})
 		if err := n.grpcServer.Serve(lis); err != nil {
@@ -281,7 +282,7 @@ func (n *Node) startElection() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 			defer cancel()
-			resp, err := n.clients[peer.ID].RequestVote(ctx, &wire.RequestVoteRequest{
+			resp, err := n.clients[peer.ID].RequestVote(ctx, &raftpb.RequestVoteRequest{
 				Term:         term,
 				CandidateId:  n.id,
 				LastLogIndex: lastLogIndex,
@@ -431,7 +432,7 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 			n.mu.Unlock()
 
 			rpcCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-			resp, rpcErr := client.InstallSnapshot(rpcCtx, &wire.InstallSnapshotRequest{
+			resp, rpcErr := client.InstallSnapshot(rpcCtx, &raftpb.InstallSnapshotRequest{
 				Term:              term,
 				LeaderId:          n.id,
 				LastIncludedIndex: snapshot.LastIncludedIndex,
@@ -478,16 +479,16 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 			n.mu.Unlock()
 			return false
 		}
-		reqEntries := make([]*wire.LogEntry, 0, len(entries))
+		reqEntries := make([]*raftpb.LogEntry, 0, len(entries))
 		lastSent := prevLogIndex
 		for _, entry := range entries {
-			reqEntries = append(reqEntries, &wire.LogEntry{Index: entry.Index, Term: entry.Term, Command: entry.Command})
+			reqEntries = append(reqEntries, &raftpb.LogEntry{Index: entry.Index, Term: entry.Term, Command: entry.Command})
 			lastSent = entry.Index
 		}
 		n.mu.Unlock()
 
 		rpcCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-		resp, rpcErr := client.AppendEntries(rpcCtx, &wire.AppendEntriesRequest{
+		resp, rpcErr := client.AppendEntries(rpcCtx, &raftpb.AppendEntriesRequest{
 			Term:         term,
 			LeaderId:     n.id,
 			PrevLogIndex: prevLogIndex,
@@ -667,13 +668,18 @@ func maxUint64(a, b uint64) uint64 {
 	return b
 }
 
-func newNotLeaderResponse(leaderID string) *wire.ClientWriteResponse {
-	return &wire.ClientWriteResponse{Success: false, LeaderId: leaderID, Error: "not leader"}
-}
-
 func wrapInternal(err error) error {
 	if err == nil {
 		return nil
 	}
 	return fmt.Errorf("internal raft error: %w", err)
+}
+
+// dialTarget keeps plain host:port addresses working with the gRPC resolver,
+// which otherwise treats "node1:9001" as a custom scheme.
+func dialTarget(address string) string {
+	if strings.Contains(address, "://") {
+		return address
+	}
+	return "passthrough:///" + address
 }

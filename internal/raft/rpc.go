@@ -4,17 +4,19 @@ import (
 	"context"
 	"time"
 
+	"github.com/RishatShay/sna-final-project/internal/raftpb"
 	"github.com/RishatShay/sna-final-project/internal/storage"
-	"github.com/RishatShay/sna-final-project/internal/wire"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-func (n *Node) RequestVote(_ context.Context, req *wire.RequestVoteRequest) (*wire.RequestVoteResponse, error) {
+func (n *Node) RequestVote(_ context.Context, req *raftpb.RequestVoteRequest) (*raftpb.RequestVoteResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
 		n.metrics.IncRPC("RequestVote", "stale_term")
-		return &wire.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
+		return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
 	}
 	if req.GetTerm() > n.currentTerm {
 		n.stepDownLocked(req.GetTerm(), "")
@@ -38,21 +40,21 @@ func (n *Node) RequestVote(_ context.Context, req *wire.RequestVoteRequest) (*wi
 		n.resetElectionDeadlineLocked()
 		n.refreshMetricsLocked()
 		n.metrics.IncRPC("RequestVote", "granted")
-		return &wire.RequestVoteResponse{Term: n.currentTerm, VoteGranted: true}, nil
+		return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: true}, nil
 	}
 
 	n.metrics.IncRPC("RequestVote", "rejected")
-	return &wire.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
+	return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
 }
 
-func (n *Node) AppendEntries(_ context.Context, req *wire.AppendEntriesRequest) (*wire.AppendEntriesResponse, error) {
+func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest) (*raftpb.AppendEntriesResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
 		n.metrics.IncRPC("AppendEntries", "stale_term")
 		lastIndex, _, _ := n.store.LastIndexAndTerm()
-		return &wire.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
+		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
 	}
 	if req.GetTerm() > n.currentTerm || n.role != RoleFollower {
 		n.stepDownLocked(req.GetTerm(), req.GetLeaderId())
@@ -67,7 +69,7 @@ func (n *Node) AppendEntries(_ context.Context, req *wire.AppendEntriesRequest) 
 	}
 	if req.GetPrevLogIndex() < snapIndex {
 		n.metrics.IncRPC("AppendEntries", "behind_snapshot")
-		return &wire.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: snapIndex}, nil
+		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: snapIndex}, nil
 	}
 	prevTerm, ok, err := n.store.Term(req.GetPrevLogIndex())
 	if err != nil {
@@ -77,7 +79,7 @@ func (n *Node) AppendEntries(_ context.Context, req *wire.AppendEntriesRequest) 
 	if !ok || prevTerm != req.GetPrevLogTerm() {
 		n.metrics.IncRPC("AppendEntries", "log_mismatch")
 		lastIndex, _, _ := n.store.LastIndexAndTerm()
-		return &wire.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
+		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
 	}
 
 	incoming := make([]storage.Entry, 0, len(req.GetEntries()))
@@ -133,16 +135,16 @@ func (n *Node) AppendEntries(_ context.Context, req *wire.AppendEntriesRequest) 
 	}
 	n.refreshMetricsLocked()
 	n.metrics.IncRPC("AppendEntries", "success")
-	return &wire.AppendEntriesResponse{Term: n.currentTerm, Success: true, MatchIndex: matchIndex}, nil
+	return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: true, MatchIndex: matchIndex}, nil
 }
 
-func (n *Node) InstallSnapshot(_ context.Context, req *wire.InstallSnapshotRequest) (*wire.InstallSnapshotResponse, error) {
+func (n *Node) InstallSnapshot(_ context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
 		n.metrics.IncRPC("InstallSnapshot", "stale_term")
-		return &wire.InstallSnapshotResponse{Term: n.currentTerm}, nil
+		return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 	}
 	if req.GetTerm() > n.currentTerm || n.role != RoleFollower {
 		n.stepDownLocked(req.GetTerm(), req.GetLeaderId())
@@ -157,7 +159,7 @@ func (n *Node) InstallSnapshot(_ context.Context, req *wire.InstallSnapshotReque
 	}
 	if req.GetLastIncludedIndex() <= currentSnapIndex {
 		n.metrics.IncRPC("InstallSnapshot", "ignored")
-		return &wire.InstallSnapshotResponse{Term: n.currentTerm}, nil
+		return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 	}
 
 	if err := n.store.InstallSnapshot(storage.Snapshot{
@@ -172,12 +174,14 @@ func (n *Node) InstallSnapshot(_ context.Context, req *wire.InstallSnapshotReque
 	n.lastApplied = maxUint64(n.lastApplied, req.GetLastIncludedIndex())
 	n.refreshMetricsLocked()
 	n.metrics.IncRPC("InstallSnapshot", "success")
-	return &wire.InstallSnapshotResponse{Term: n.currentTerm}, nil
+	return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 }
 
-func (n *Node) Write(ctx context.Context, req *wire.ClientWriteRequest) (*wire.ClientWriteResponse, error) {
+// Write stores key=value through the replicated log. The generated response no
+// longer carries a Success/Error pair, so failures are reported as gRPC errors.
+func (n *Node) Write(ctx context.Context, req *raftpb.WriteRequest) (*raftpb.WriteResponse, error) {
 	if req.GetKey() == "" {
-		return &wire.ClientWriteResponse{Success: false, Error: "key is required"}, nil
+		return nil, status.Error(codes.InvalidArgument, "key is required")
 	}
 
 	n.mu.Lock()
@@ -188,7 +192,7 @@ func (n *Node) Write(ctx context.Context, req *wire.ClientWriteRequest) (*wire.C
 		if client != nil {
 			return client.Write(ctx, req)
 		}
-		return newNotLeaderResponse(leaderID), nil
+		return nil, notLeaderError(leaderID)
 	}
 	commandBytes, err := encodeSetCommand(req.GetKey(), req.GetValue())
 	if err != nil {
@@ -224,7 +228,7 @@ func (n *Node) Write(ctx context.Context, req *wire.ClientWriteRequest) (*wire.C
 		if n.role != RoleLeader || n.currentTerm != term {
 			leaderID := n.leaderID
 			n.mu.Unlock()
-			return newNotLeaderResponse(leaderID), nil
+			return nil, notLeaderError(leaderID)
 		}
 		if n.commitIndex >= entry.Index {
 			n.mu.Unlock()
@@ -233,29 +237,29 @@ func (n *Node) Write(ctx context.Context, req *wire.ClientWriteRequest) (*wire.C
 				"index": entry.Index,
 				"term":  term,
 			})
-			return &wire.ClientWriteResponse{Success: true, LeaderId: n.id, Index: entry.Index, Term: term}, nil
+			return &raftpb.WriteResponse{LeaderId: n.id, Index: entry.Index, Term: term}, nil
 		}
 		majority := n.majorityLocked()
 		n.mu.Unlock()
 		if successes < majority {
 			select {
 			case <-waitCtx.Done():
-				return &wire.ClientWriteResponse{Success: false, LeaderId: n.id, Error: waitCtx.Err().Error(), Index: entry.Index, Term: term}, nil
+				return nil, status.Errorf(codes.DeadlineExceeded, "entry %d was not committed by a majority", entry.Index)
 			case <-ticker.C:
 			}
 			continue
 		}
 		select {
 		case <-waitCtx.Done():
-			return &wire.ClientWriteResponse{Success: false, LeaderId: n.id, Error: waitCtx.Err().Error(), Index: entry.Index, Term: term}, nil
+			return nil, status.Errorf(codes.DeadlineExceeded, "entry %d was not committed by a majority", entry.Index)
 		case <-ticker.C:
 		}
 	}
 }
 
-func (n *Node) Read(ctx context.Context, req *wire.ClientReadRequest) (*wire.ClientReadResponse, error) {
+func (n *Node) Read(ctx context.Context, req *raftpb.ReadRequest) (*raftpb.ReadResponse, error) {
 	if req.GetKey() == "" {
-		return &wire.ClientReadResponse{Success: false, Error: "key is required"}, nil
+		return nil, status.Error(codes.InvalidArgument, "key is required")
 	}
 	n.mu.Lock()
 	if n.role != RoleLeader {
@@ -265,7 +269,7 @@ func (n *Node) Read(ctx context.Context, req *wire.ClientReadRequest) (*wire.Cli
 		if client != nil {
 			return client.Read(ctx, req)
 		}
-		return &wire.ClientReadResponse{Success: false, LeaderId: leaderID, Error: "not leader"}, nil
+		return nil, notLeaderError(leaderID)
 	}
 	n.mu.Unlock()
 
@@ -277,12 +281,12 @@ func (n *Node) Read(ctx context.Context, req *wire.ClientReadRequest) (*wire.Cli
 	if n.role != RoleLeader {
 		leaderID := n.leaderID
 		n.mu.Unlock()
-		return &wire.ClientReadResponse{Success: false, LeaderId: leaderID, Error: "not leader"}, nil
+		return nil, notLeaderError(leaderID)
 	}
 	majority := n.majorityLocked()
 	n.mu.Unlock()
 	if successes < majority {
-		return &wire.ClientReadResponse{Success: false, LeaderId: n.id, Error: "could not confirm leader quorum"}, nil
+		return nil, status.Error(codes.Unavailable, "could not confirm leader quorum")
 	}
 
 	value, ok, err := n.store.Get(req.GetKey())
@@ -290,13 +294,13 @@ func (n *Node) Read(ctx context.Context, req *wire.ClientReadRequest) (*wire.Cli
 		return nil, wrapInternal(err)
 	}
 	if !ok {
-		return &wire.ClientReadResponse{Success: false, LeaderId: n.id, Error: "key not found"}, nil
+		return nil, status.Errorf(codes.NotFound, "key %q does not exist", req.GetKey())
 	}
 	n.logger.Info("client read served", map[string]any{"key": req.GetKey()})
-	return &wire.ClientReadResponse{Success: true, LeaderId: n.id, Value: value}, nil
+	return &raftpb.ReadResponse{LeaderId: n.id, Value: value}, nil
 }
 
-func (n *Node) Status(context.Context, *wire.StatusRequest) (*wire.StatusResponse, error) {
+func (n *Node) Status(context.Context, *raftpb.StatusRequest) (*raftpb.StatusResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -304,9 +308,9 @@ func (n *Node) Status(context.Context, *wire.StatusRequest) (*wire.StatusRespons
 	if err != nil {
 		return nil, wrapInternal(err)
 	}
-	peers := make([]*wire.PeerStatus, 0, len(n.peers))
+	peers := make([]*raftpb.PeerStatus, 0, len(n.peers))
 	for _, peer := range n.peers {
-		peers = append(peers, &wire.PeerStatus{
+		peers = append(peers, &raftpb.PeerStatus{
 			Id:         peer.ID,
 			Address:    peer.Address,
 			MatchIndex: n.matchIndex[peer.ID],
@@ -317,7 +321,7 @@ func (n *Node) Status(context.Context, *wire.StatusRequest) (*wire.StatusRespons
 	if n.role == RoleLeader {
 		leaderID = n.id
 	}
-	return &wire.StatusResponse{
+	return &raftpb.StatusResponse{
 		Id:           n.id,
 		Role:         string(n.role),
 		Term:         n.currentTerm,
@@ -336,4 +340,11 @@ func (n *Node) MustLeaderID() (string, bool) {
 		return n.id, true
 	}
 	return n.leaderID, false
+}
+
+func notLeaderError(leaderID string) error {
+	if leaderID == "" {
+		return status.Error(codes.Unavailable, "no leader has been elected yet")
+	}
+	return status.Errorf(codes.Unavailable, "this node is not the leader, try %q", leaderID)
 }

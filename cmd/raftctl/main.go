@@ -6,9 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/RishatShay/sna-final-project/internal/wire"
+	"github.com/RishatShay/sna-final-project/internal/raftpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -23,12 +24,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	conn, err := grpc.NewClient(wire.DialTarget(*addr), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(dialTarget(*addr), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		fatal(err)
 	}
 	defer conn.Close()
-	client := wire.NewClientServiceClient(conn)
+	client := raftpb.NewClientServiceClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -39,29 +40,23 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		resp, err := client.Write(ctx, &wire.ClientWriteRequest{Key: flag.Arg(1), Value: flag.Arg(2)})
+		resp, err := client.Write(ctx, &raftpb.WriteRequest{Key: flag.Arg(1), Value: flag.Arg(2)})
 		if err != nil {
 			fatal(err)
 		}
 		printJSON(resp)
-		if !resp.GetSuccess() {
-			os.Exit(1)
-		}
 	case "read":
 		if flag.NArg() != 2 {
 			usage()
 			os.Exit(2)
 		}
-		resp, err := client.Read(ctx, &wire.ClientReadRequest{Key: flag.Arg(1)})
+		resp, err := client.Read(ctx, &raftpb.ReadRequest{Key: flag.Arg(1)})
 		if err != nil {
 			fatal(err)
 		}
 		printJSON(resp)
-		if !resp.GetSuccess() {
-			os.Exit(1)
-		}
 	case "status":
-		resp, err := client.Status(ctx, &wire.StatusRequest{})
+		resp, err := client.Status(ctx, &raftpb.StatusRequest{})
 		if err != nil {
 			fatal(err)
 		}
@@ -89,4 +84,12 @@ func printJSON(value any) {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(value)
+}
+
+// dialTarget keeps plain host:port addresses working with the gRPC resolver.
+func dialTarget(address string) string {
+	if strings.Contains(address, "://") {
+		return address
+	}
+	return "passthrough:///" + address
 }
