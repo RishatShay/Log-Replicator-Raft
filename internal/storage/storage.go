@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 
-	_ "github.com/mattn/go-sqlite3"
+	// Pure Go SQLite driver, so the binaries stay static and cgo-free.
+	_ "modernc.org/sqlite"
 )
 
 type Entry struct {
@@ -33,8 +35,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 
-	path := filepath.Join(dir, "raft.db")
-	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=FULL")
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(dir, "raft.db")))
 	if err != nil {
 		return nil, err
 	}
@@ -52,34 +53,42 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// dataSourceName enables the write-ahead log and full durability: an entry has
+// to be on disk before a Raft RPC can answer that it is stored.
+func dataSourceName(path string) string {
+	pragmas := url.Values{}
+	pragmas.Add("_pragma", "busy_timeout(5000)")
+	pragmas.Add("_pragma", "journal_mode(WAL)")
+	pragmas.Add("_pragma", "synchronous(FULL)")
+	return "file:" + path + "?" + pragmas.Encode()
+}
+
 func (s *Store) init() error {
-	statements := []string{
-		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA synchronous=FULL;`,
+	schema := []string{
 		`CREATE TABLE IF NOT EXISTS metadata (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
-		);`,
+		)`,
 		`CREATE TABLE IF NOT EXISTS log_entries (
 			idx INTEGER PRIMARY KEY,
 			term INTEGER NOT NULL,
 			command BLOB NOT NULL
-		);`,
+		)`,
 		`CREATE TABLE IF NOT EXISTS kv (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
 			log_index INTEGER NOT NULL
-		);`,
+		)`,
 		`CREATE TABLE IF NOT EXISTS snapshot (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			last_included_index INTEGER NOT NULL,
 			last_included_term INTEGER NOT NULL,
 			data BLOB NOT NULL
-		);`,
+		)`,
 	}
-	for _, stmt := range statements {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return err
+	for _, statement := range schema {
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("create schema: %w", err)
 		}
 	}
 
