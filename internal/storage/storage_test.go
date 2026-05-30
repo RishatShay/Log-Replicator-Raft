@@ -2,6 +2,74 @@ package storage
 
 import "testing"
 
+func TestStoreEntriesFromRespectsLimitAndSnapshot(t *testing.T) {
+	store := openStore(t)
+
+	entries := make([]Entry, 0, 5)
+	for index := uint64(1); index <= 5; index++ {
+		entries = append(entries, Entry{Index: index, Term: 1, Command: []byte("command")})
+	}
+	if err := store.AppendEntries(entries); err != nil {
+		t.Fatal(err)
+	}
+
+	batch, err := store.EntriesFrom(2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 2 || batch[0].Index != 2 || batch[1].Index != 3 {
+		t.Fatalf("batch = %v, want entries 2 and 3", batch)
+	}
+
+	if _, err := store.CreateSnapshot(3, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Entries below the snapshot are gone, so the read starts after it.
+	rest, err := store.EntriesFrom(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 2 || rest[0].Index != 4 {
+		t.Fatalf("rest = %v, want entries 4 and 5", rest)
+	}
+}
+
+func TestStoreAppliesAndSkipsIndexes(t *testing.T) {
+	store := openStore(t)
+
+	if err := store.ApplySet(1, "key", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyDelete(2, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get("key"); err != nil || found {
+		t.Fatalf("key still exists: found=%v err=%v", found, err)
+	}
+
+	if err := store.SkipTo(7); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := store.LastApplied()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 7 {
+		t.Fatalf("last applied = %d, want 7", applied)
+	}
+}
+
+func openStore(t *testing.T) *Store {
+	t.Helper()
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
 func TestStorePersistsMetadataAndLog(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)
