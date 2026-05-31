@@ -61,12 +61,16 @@ func encodeSetCommand(key, value string) ([]byte, error) {
 	return json.Marshal(command{Op: "set", Key: key, Value: value})
 }
 
+func encodeDeleteCommand(key string) ([]byte, error) {
+	return json.Marshal(command{Op: "delete", Key: key})
+}
+
 func decodeCommand(raw []byte) (command, error) {
 	var cmd command
 	if err := json.Unmarshal(raw, &cmd); err != nil {
 		return command{}, err
 	}
-	if cmd.Op != "set" {
+	if cmd.Op != "set" && cmd.Op != "delete" {
 		return command{}, errors.New("unsupported command")
 	}
 	return cmd, nil

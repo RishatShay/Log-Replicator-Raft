@@ -592,7 +592,12 @@ func (n *Node) applyCommittedLocked() {
 			n.logger.Error("failed to decode command", map[string]any{"index": entry.Index, "error": err.Error()})
 			return
 		}
-		if err := n.store.ApplySet(entry.Index, cmd.Key, cmd.Value); err != nil {
+		if cmd.Op == "delete" {
+			err = n.store.ApplyDelete(entry.Index, cmd.Key)
+		} else {
+			err = n.store.ApplySet(entry.Index, cmd.Key, cmd.Value)
+		}
+		if err != nil {
 			n.logger.Error("failed to apply command", map[string]any{"index": entry.Index, "error": err.Error()})
 			return
 		}
