@@ -1,124 +1,104 @@
+// Package metrics exposes the Raft state of a node in Prometheus format.
 package metrics
 
 import (
-	"fmt"
 	"net/http"
-	"sort"
-	"strings"
-	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Metrics owns its own registry so that every series carries the node_id label.
 type Metrics struct {
-	mu sync.Mutex
+	registry *prometheus.Registry
 
-	nodeID       string
-	role         string
-	term         uint64
-	commitIndex  uint64
-	lastApplied  uint64
-	lastLogIndex uint64
-	elections    uint64
-	rpcs         map[string]uint64
-	lag          map[string]uint64
+	isLeader       prometheus.Gauge
+	term           prometheus.Gauge
+	commitIndex    prometheus.Gauge
+	lastApplied    prometheus.Gauge
+	lastLogIndex   prometheus.Gauge
+	snapshotIndex  prometheus.Gauge
+	elections      prometheus.Counter
+	rpcs           *prometheus.CounterVec
+	replicationLag *prometheus.GaugeVec
 }
 
 func New(nodeID string) *Metrics {
+	registry := prometheus.NewRegistry()
+	factory := promauto.With(prometheus.WrapRegistererWith(prometheus.Labels{"node_id": nodeID}, registry))
+	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
 	return &Metrics{
-		nodeID: nodeID,
-		role:   "follower",
-		rpcs:   map[string]uint64{},
-		lag:    map[string]uint64{},
+		registry: registry,
+		isLeader: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_is_leader",
+			Help: "1 when this node believes it is the leader.",
+		}),
+		term: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_current_term",
+			Help: "Current Raft term.",
+		}),
+		commitIndex: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_commit_index",
+			Help: "Highest log index known to be committed.",
+		}),
+		lastApplied: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_last_applied",
+			Help: "Highest log index applied to the state machine.",
+		}),
+		lastLogIndex: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_last_log_index",
+			Help: "Highest log index stored locally.",
+		}),
+		snapshotIndex: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "raft_snapshot_index",
+			Help: "Log index covered by the latest snapshot.",
+		}),
+		elections: factory.NewCounter(prometheus.CounterOpts{
+			Name: "raft_elections_total",
+			Help: "Elections started by this node.",
+		}),
+		rpcs: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "raft_rpc_total",
+			Help: "Consensus RPCs served by this node.",
+		}, []string{"method", "result"}),
+		replicationLag: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "raft_replication_lag_entries",
+			Help: "Entries the leader still has to ship to a peer.",
+		}, []string{"peer_id"}),
 	}
 }
 
-func (m *Metrics) SetState(role string, term, commitIndex, lastApplied, lastLogIndex uint64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.role = role
-	m.term = term
-	m.commitIndex = commitIndex
-	m.lastApplied = lastApplied
-	m.lastLogIndex = lastLogIndex
+// Handler serves the /metrics endpoint.
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
-func (m *Metrics) IncElection() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.elections++
-}
-
-func (m *Metrics) IncRPC(method, result string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rpcs[method+"|"+result]++
-}
-
-func (m *Metrics) SetReplicationLag(peerID string, lag uint64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.lag[peerID] = lag
-}
-
-func (m *Metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	labels := fmt.Sprintf(`node_id="%s"`, escapeLabel(m.nodeID))
-	leader := 0
-	if m.role == "leader" {
+// SetState publishes the current Raft state of the node.
+func (m *Metrics) SetState(isLeader bool, term, commitIndex, lastApplied, lastLogIndex, snapshotIndex uint64) {
+	leader := 0.0
+	if isLeader {
 		leader = 1
 	}
-
-	fmt.Fprintf(w, "# HELP raft_node_up Node liveness marker.\n")
-	fmt.Fprintf(w, "# TYPE raft_node_up gauge\n")
-	fmt.Fprintf(w, "raft_node_up{%s} 1\n", labels)
-	fmt.Fprintf(w, "# HELP raft_is_leader Whether this node currently believes it is leader.\n")
-	fmt.Fprintf(w, "# TYPE raft_is_leader gauge\n")
-	fmt.Fprintf(w, "raft_is_leader{%s} %d\n", labels, leader)
-	fmt.Fprintf(w, "# HELP raft_current_term Current Raft term.\n")
-	fmt.Fprintf(w, "# TYPE raft_current_term gauge\n")
-	fmt.Fprintf(w, "raft_current_term{%s} %d\n", labels, m.term)
-	fmt.Fprintf(w, "# HELP raft_commit_index Highest committed log index.\n")
-	fmt.Fprintf(w, "# TYPE raft_commit_index gauge\n")
-	fmt.Fprintf(w, "raft_commit_index{%s} %d\n", labels, m.commitIndex)
-	fmt.Fprintf(w, "# HELP raft_last_applied Highest state-machine-applied log index.\n")
-	fmt.Fprintf(w, "# TYPE raft_last_applied gauge\n")
-	fmt.Fprintf(w, "raft_last_applied{%s} %d\n", labels, m.lastApplied)
-	fmt.Fprintf(w, "# HELP raft_last_log_index Highest local log index.\n")
-	fmt.Fprintf(w, "# TYPE raft_last_log_index gauge\n")
-	fmt.Fprintf(w, "raft_last_log_index{%s} %d\n", labels, m.lastLogIndex)
-	fmt.Fprintf(w, "# HELP raft_elections_total Elections started by this node.\n")
-	fmt.Fprintf(w, "# TYPE raft_elections_total counter\n")
-	fmt.Fprintf(w, "raft_elections_total{%s} %d\n", labels, m.elections)
-
-	rpcKeys := make([]string, 0, len(m.rpcs))
-	for key := range m.rpcs {
-		rpcKeys = append(rpcKeys, key)
-	}
-	sort.Strings(rpcKeys)
-	fmt.Fprintf(w, "# HELP raft_rpc_total Consensus RPCs handled by method and result.\n")
-	fmt.Fprintf(w, "# TYPE raft_rpc_total counter\n")
-	for _, key := range rpcKeys {
-		parts := strings.SplitN(key, "|", 2)
-		fmt.Fprintf(w, "raft_rpc_total{%s,method=\"%s\",result=\"%s\"} %d\n", labels, escapeLabel(parts[0]), escapeLabel(parts[1]), m.rpcs[key])
-	}
-
-	peers := make([]string, 0, len(m.lag))
-	for peer := range m.lag {
-		peers = append(peers, peer)
-	}
-	sort.Strings(peers)
-	fmt.Fprintf(w, "# HELP raft_replication_lag_entries Leader-side lag by peer.\n")
-	fmt.Fprintf(w, "# TYPE raft_replication_lag_entries gauge\n")
-	for _, peer := range peers {
-		fmt.Fprintf(w, "raft_replication_lag_entries{%s,peer_id=\"%s\"} %d\n", labels, escapeLabel(peer), m.lag[peer])
-	}
+	m.isLeader.Set(leader)
+	m.term.Set(float64(term))
+	m.commitIndex.Set(float64(commitIndex))
+	m.lastApplied.Set(float64(lastApplied))
+	m.lastLogIndex.Set(float64(lastLogIndex))
+	m.snapshotIndex.Set(float64(snapshotIndex))
 }
 
-func escapeLabel(value string) string {
-	value = strings.ReplaceAll(value, "\\", "\\\\")
-	value = strings.ReplaceAll(value, "\n", "\\n")
-	value = strings.ReplaceAll(value, "\"", "\\\"")
-	return value
+func (m *Metrics) ElectionStarted() {
+	m.elections.Inc()
+}
+
+// RPCHandled records one served consensus RPC, for example ("AppendEntries", "log_mismatch").
+func (m *Metrics) RPCHandled(method, result string) {
+	m.rpcs.WithLabelValues(method, result).Inc()
+}
+
+func (m *Metrics) SetReplicationLag(peerID string, entries uint64) {
+	m.replicationLag.WithLabelValues(peerID).Set(float64(entries))
 }

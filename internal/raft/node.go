@@ -162,7 +162,7 @@ func (n *Node) Start() error {
 
 	if n.httpAddr != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", n.metrics)
+		mux.Handle("/metrics", n.metrics.Handler())
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte("ok\n"))
 		})
@@ -269,7 +269,7 @@ func (n *Node) startElection() {
 	}
 	n.resetElectionDeadlineLocked()
 	n.refreshMetricsLocked()
-	n.metrics.IncElection()
+	n.metrics.ElectionStarted()
 	majority := n.majorityLocked()
 	peers := append([]Peer(nil), n.peers...)
 	n.mu.Unlock()
@@ -367,7 +367,11 @@ func (n *Node) refreshMetricsLocked() {
 	if err != nil {
 		lastIndex = 0
 	}
-	n.metrics.SetState(string(n.role), n.currentTerm, n.commitIndex, n.lastApplied, lastIndex)
+	snapIndex, _, err := n.store.SnapshotIndexTerm()
+	if err != nil {
+		snapIndex = 0
+	}
+	n.metrics.SetState(n.role == RoleLeader, n.currentTerm, n.commitIndex, n.lastApplied, lastIndex, snapIndex)
 }
 
 func (n *Node) replicateAllOnce(ctx context.Context) int {

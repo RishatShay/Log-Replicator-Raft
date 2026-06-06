@@ -15,7 +15,7 @@ func (n *Node) RequestVote(_ context.Context, req *raftpb.RequestVoteRequest) (*
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
-		n.metrics.IncRPC("RequestVote", "stale_term")
+		n.metrics.RPCHandled("RequestVote", "stale_term")
 		return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
 	}
 	if req.GetTerm() > n.currentTerm {
@@ -24,7 +24,7 @@ func (n *Node) RequestVote(_ context.Context, req *raftpb.RequestVoteRequest) (*
 
 	lastLogIndex, lastLogTerm, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		n.metrics.IncRPC("RequestVote", "error")
+		n.metrics.RPCHandled("RequestVote", "error")
 		return nil, wrapInternal(err)
 	}
 	upToDate := req.GetLastLogTerm() > lastLogTerm ||
@@ -34,16 +34,16 @@ func (n *Node) RequestVote(_ context.Context, req *raftpb.RequestVoteRequest) (*
 	if canVote && upToDate {
 		n.votedFor = req.GetCandidateId()
 		if err := n.store.SaveTermVote(n.currentTerm, n.votedFor); err != nil {
-			n.metrics.IncRPC("RequestVote", "error")
+			n.metrics.RPCHandled("RequestVote", "error")
 			return nil, wrapInternal(err)
 		}
 		n.resetElectionDeadlineLocked()
 		n.refreshMetricsLocked()
-		n.metrics.IncRPC("RequestVote", "granted")
+		n.metrics.RPCHandled("RequestVote", "granted")
 		return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: true}, nil
 	}
 
-	n.metrics.IncRPC("RequestVote", "rejected")
+	n.metrics.RPCHandled("RequestVote", "rejected")
 	return &raftpb.RequestVoteResponse{Term: n.currentTerm, VoteGranted: false}, nil
 }
 
@@ -52,7 +52,7 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
-		n.metrics.IncRPC("AppendEntries", "stale_term")
+		n.metrics.RPCHandled("AppendEntries", "stale_term")
 		lastIndex, _, _ := n.store.LastIndexAndTerm()
 		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
 	}
@@ -64,20 +64,20 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 
 	snapIndex, _, err := n.store.SnapshotIndexTerm()
 	if err != nil {
-		n.metrics.IncRPC("AppendEntries", "error")
+		n.metrics.RPCHandled("AppendEntries", "error")
 		return nil, wrapInternal(err)
 	}
 	if req.GetPrevLogIndex() < snapIndex {
-		n.metrics.IncRPC("AppendEntries", "behind_snapshot")
+		n.metrics.RPCHandled("AppendEntries", "behind_snapshot")
 		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: snapIndex}, nil
 	}
 	prevTerm, ok, err := n.store.Term(req.GetPrevLogIndex())
 	if err != nil {
-		n.metrics.IncRPC("AppendEntries", "error")
+		n.metrics.RPCHandled("AppendEntries", "error")
 		return nil, wrapInternal(err)
 	}
 	if !ok || prevTerm != req.GetPrevLogTerm() {
-		n.metrics.IncRPC("AppendEntries", "log_mismatch")
+		n.metrics.RPCHandled("AppendEntries", "log_mismatch")
 		lastIndex, _, _ := n.store.LastIndexAndTerm()
 		return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: false, MatchIndex: lastIndex}, nil
 	}
@@ -101,7 +101,7 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 	for i, entry := range incoming {
 		localTerm, exists, err := n.store.Term(entry.Index)
 		if err != nil {
-			n.metrics.IncRPC("AppendEntries", "error")
+			n.metrics.RPCHandled("AppendEntries", "error")
 			return nil, wrapInternal(err)
 		}
 		if !exists {
@@ -110,7 +110,7 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 		}
 		if localTerm != entry.Term {
 			if err := n.store.DeleteFrom(entry.Index); err != nil {
-				n.metrics.IncRPC("AppendEntries", "error")
+				n.metrics.RPCHandled("AppendEntries", "error")
 				return nil, wrapInternal(err)
 			}
 			toAppend = incoming[i:]
@@ -119,14 +119,14 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 	}
 	if len(toAppend) > 0 {
 		if err := n.store.AppendEntries(toAppend); err != nil {
-			n.metrics.IncRPC("AppendEntries", "error")
+			n.metrics.RPCHandled("AppendEntries", "error")
 			return nil, wrapInternal(err)
 		}
 	}
 
 	lastIndex, _, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		n.metrics.IncRPC("AppendEntries", "error")
+		n.metrics.RPCHandled("AppendEntries", "error")
 		return nil, wrapInternal(err)
 	}
 	if req.GetLeaderCommit() > n.commitIndex {
@@ -134,7 +134,7 @@ func (n *Node) AppendEntries(_ context.Context, req *raftpb.AppendEntriesRequest
 		n.applyCommittedLocked()
 	}
 	n.refreshMetricsLocked()
-	n.metrics.IncRPC("AppendEntries", "success")
+	n.metrics.RPCHandled("AppendEntries", "success")
 	return &raftpb.AppendEntriesResponse{Term: n.currentTerm, Success: true, MatchIndex: matchIndex}, nil
 }
 
@@ -143,7 +143,7 @@ func (n *Node) InstallSnapshot(_ context.Context, req *raftpb.InstallSnapshotReq
 	defer n.mu.Unlock()
 
 	if req.GetTerm() < n.currentTerm {
-		n.metrics.IncRPC("InstallSnapshot", "stale_term")
+		n.metrics.RPCHandled("InstallSnapshot", "stale_term")
 		return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 	}
 	if req.GetTerm() > n.currentTerm || n.role != RoleFollower {
@@ -154,11 +154,11 @@ func (n *Node) InstallSnapshot(_ context.Context, req *raftpb.InstallSnapshotReq
 
 	currentSnapIndex, _, err := n.store.SnapshotIndexTerm()
 	if err != nil {
-		n.metrics.IncRPC("InstallSnapshot", "error")
+		n.metrics.RPCHandled("InstallSnapshot", "error")
 		return nil, wrapInternal(err)
 	}
 	if req.GetLastIncludedIndex() <= currentSnapIndex {
-		n.metrics.IncRPC("InstallSnapshot", "ignored")
+		n.metrics.RPCHandled("InstallSnapshot", "ignored")
 		return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 	}
 
@@ -167,13 +167,13 @@ func (n *Node) InstallSnapshot(_ context.Context, req *raftpb.InstallSnapshotReq
 		LastIncludedTerm:  req.GetLastIncludedTerm(),
 		Data:              req.GetData(),
 	}); err != nil {
-		n.metrics.IncRPC("InstallSnapshot", "error")
+		n.metrics.RPCHandled("InstallSnapshot", "error")
 		return nil, wrapInternal(err)
 	}
 	n.commitIndex = maxUint64(n.commitIndex, req.GetLastIncludedIndex())
 	n.lastApplied = maxUint64(n.lastApplied, req.GetLastIncludedIndex())
 	n.refreshMetricsLocked()
-	n.metrics.IncRPC("InstallSnapshot", "success")
+	n.metrics.RPCHandled("InstallSnapshot", "success")
 	return &raftpb.InstallSnapshotResponse{Term: n.currentTerm}, nil
 }
 
