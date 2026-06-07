@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
@@ -12,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/RishatShay/sna-final-project/internal/logging"
 	"github.com/RishatShay/sna-final-project/internal/metrics"
 	"github.com/RishatShay/sna-final-project/internal/raftpb"
 	"github.com/RishatShay/sna-final-project/internal/storage"
@@ -39,7 +39,7 @@ type Node struct {
 	peers    []Peer
 
 	store   *storage.Store
-	logger  *logging.Logger
+	logger  *slog.Logger
 	metrics *metrics.Metrics
 
 	role        Role
@@ -87,6 +87,9 @@ func New(opts Options) (*Node, error) {
 	if opts.HeartbeatInterval == 0 {
 		opts.HeartbeatInterval = defaultHeartbeatInterval
 	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
 
 	store, err := storage.Open(opts.DataDir)
 	if err != nil {
@@ -109,7 +112,7 @@ func New(opts Options) (*Node, error) {
 		httpAddr:          opts.HTTPAddr,
 		peers:             opts.Peers,
 		store:             store,
-		logger:            logging.New(opts.NodeID),
+		logger:            opts.Logger.With("node_id", opts.NodeID),
 		metrics:           metrics.New(opts.NodeID),
 		role:              RoleFollower,
 		currentTerm:       term,
@@ -154,9 +157,9 @@ func (n *Node) Start() error {
 	raftpb.RegisterRaftServiceServer(n.grpcServer, n)
 	raftpb.RegisterClientServiceServer(n.grpcServer, n)
 	go func() {
-		n.logger.Info("grpc server started", map[string]any{"addr": n.grpcAddr})
+		n.logger.Info("grpc server started", "addr", n.grpcAddr)
 		if err := n.grpcServer.Serve(lis); err != nil {
-			n.logger.Warn("grpc server stopped", map[string]any{"error": err.Error()})
+			n.logger.Warn("grpc server stopped", "error", err)
 		}
 	}()
 
@@ -168,9 +171,9 @@ func (n *Node) Start() error {
 		})
 		n.httpServer = &http.Server{Addr: n.httpAddr, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 		go func() {
-			n.logger.Info("http server started", map[string]any{"addr": n.httpAddr})
+			n.logger.Info("http server started", "addr", n.httpAddr)
 			if err := n.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				n.logger.Warn("http server stopped", map[string]any{"error": err.Error()})
+				n.logger.Warn("http server stopped", "error", err)
 			}
 		}()
 	}
@@ -255,14 +258,14 @@ func (n *Node) startElection() {
 	n.votedFor = n.id
 	n.leaderID = ""
 	if err := n.store.SaveTermVote(n.currentTerm, n.votedFor); err != nil {
-		n.logger.Error("failed to persist election term", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to persist election term", "error", err)
 		n.resetElectionDeadlineLocked()
 		n.mu.Unlock()
 		return
 	}
 	lastLogIndex, lastLogTerm, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		n.logger.Error("failed to read last log for election", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to read last log for election", "error", err)
 		n.resetElectionDeadlineLocked()
 		n.mu.Unlock()
 		return
@@ -274,7 +277,7 @@ func (n *Node) startElection() {
 	peers := append([]Peer(nil), n.peers...)
 	n.mu.Unlock()
 
-	n.logger.Info("election started", map[string]any{"term": term})
+	n.logger.Info("election started", "term", term)
 	var votes int32 = 1
 	var won atomic.Bool
 	for _, peer := range peers {
@@ -318,7 +321,7 @@ func (n *Node) startElection() {
 func (n *Node) becomeLeaderLocked() {
 	lastIndex, _, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		n.logger.Error("failed to initialize leader replication state", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to initialize leader replication state", "error", err)
 		return
 	}
 	n.role = RoleLeader
@@ -331,7 +334,7 @@ func (n *Node) becomeLeaderLocked() {
 	}
 	n.matchIndex[n.id] = lastIndex
 	n.refreshMetricsLocked()
-	n.logger.Info("became leader", map[string]any{"term": n.currentTerm})
+	n.logger.Info("became leader", "term", n.currentTerm)
 	go n.replicateAllOnce(context.Background())
 }
 
@@ -340,7 +343,7 @@ func (n *Node) stepDownLocked(term uint64, leaderID string) {
 		n.currentTerm = term
 		n.votedFor = ""
 		if err := n.store.SaveTermVote(n.currentTerm, n.votedFor); err != nil {
-			n.logger.Error("failed to persist higher term", map[string]any{"error": err.Error()})
+			n.logger.Error("failed to persist higher term", "error", err)
 		}
 	}
 	n.role = RoleFollower
@@ -422,14 +425,14 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 		}
 		snapIndex, snapTerm, err := n.store.SnapshotIndexTerm()
 		if err != nil {
-			n.logger.Error("failed to read snapshot metadata", map[string]any{"peer_id": peerID, "error": err.Error()})
+			n.logger.Error("failed to read snapshot metadata", "peer_id", peerID, "error", err)
 			n.mu.Unlock()
 			return false
 		}
 		if next <= snapIndex {
 			snapshot, err := n.store.LoadSnapshot()
 			if err != nil {
-				n.logger.Error("failed to load snapshot", map[string]any{"peer_id": peerID, "error": err.Error()})
+				n.logger.Error("failed to load snapshot", "peer_id", peerID, "error", err)
 				n.mu.Unlock()
 				return false
 			}
@@ -464,7 +467,7 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 		prevLogIndex := next - 1
 		prevLogTerm, ok, err := n.store.Term(prevLogIndex)
 		if err != nil {
-			n.logger.Error("failed to read previous log term", map[string]any{"peer_id": peerID, "error": err.Error()})
+			n.logger.Error("failed to read previous log term", "peer_id", peerID, "error", err)
 			n.mu.Unlock()
 			return false
 		}
@@ -479,7 +482,7 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 		}
 		entries, err := n.store.EntriesFrom(next, appendBatchSize)
 		if err != nil {
-			n.logger.Error("failed to read entries for replication", map[string]any{"peer_id": peerID, "error": err.Error()})
+			n.logger.Error("failed to read entries for replication", "peer_id", peerID, "error", err)
 			n.mu.Unlock()
 			return false
 		}
@@ -544,14 +547,14 @@ func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
 func (n *Node) advanceCommitLocked() {
 	lastIndex, _, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		n.logger.Error("failed to read last log while advancing commit", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to read last log while advancing commit", "error", err)
 		return
 	}
 	majority := n.majorityLocked()
 	for idx := n.commitIndex + 1; idx <= lastIndex; idx++ {
 		term, ok, err := n.store.Term(idx)
 		if err != nil {
-			n.logger.Error("failed to read term while advancing commit", map[string]any{"error": err.Error()})
+			n.logger.Error("failed to read term while advancing commit", "error", err)
 			return
 		}
 		if !ok || term != n.currentTerm {
@@ -575,25 +578,25 @@ func (n *Node) applyCommittedLocked() {
 		next := n.lastApplied + 1
 		entry, ok, err := n.store.Entry(next)
 		if err != nil {
-			n.logger.Error("failed to load committed entry", map[string]any{"index": next, "error": err.Error()})
+			n.logger.Error("failed to load committed entry", "index", next, "error", err)
 			return
 		}
 		if !ok {
 			snapIndex, _, err := n.store.SnapshotIndexTerm()
 			if err != nil {
-				n.logger.Error("failed to read snapshot metadata while applying", map[string]any{"error": err.Error()})
+				n.logger.Error("failed to read snapshot metadata while applying", "error", err)
 				return
 			}
 			if next <= snapIndex {
 				n.lastApplied = snapIndex
 				continue
 			}
-			n.logger.Error("committed entry missing", map[string]any{"index": next})
+			n.logger.Error("committed entry missing", "index", next)
 			return
 		}
 		cmd, err := decodeCommand(entry.Command)
 		if err != nil {
-			n.logger.Error("failed to decode command", map[string]any{"index": entry.Index, "error": err.Error()})
+			n.logger.Error("failed to decode command", "index", entry.Index, "error", err)
 			return
 		}
 		if cmd.Op == "delete" {
@@ -602,7 +605,7 @@ func (n *Node) applyCommittedLocked() {
 			err = n.store.ApplySet(entry.Index, cmd.Key, cmd.Value)
 		}
 		if err != nil {
-			n.logger.Error("failed to apply command", map[string]any{"index": entry.Index, "error": err.Error()})
+			n.logger.Error("failed to apply command", "index", entry.Index, "error", err)
 			return
 		}
 		n.lastApplied = entry.Index
@@ -617,7 +620,7 @@ func (n *Node) compactIfNeededLocked() {
 	}
 	snapIndex, _, err := n.store.SnapshotIndexTerm()
 	if err != nil {
-		n.logger.Error("failed to read snapshot metadata for compaction", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to read snapshot metadata for compaction", "error", err)
 		return
 	}
 	if n.lastApplied <= snapIndex || n.lastApplied-snapIndex < n.snapshotThreshold {
@@ -625,17 +628,17 @@ func (n *Node) compactIfNeededLocked() {
 	}
 	term, ok, err := n.store.Term(n.lastApplied)
 	if err != nil {
-		n.logger.Error("failed to read snapshot term", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to read snapshot term", "error", err)
 		return
 	}
 	if !ok {
 		return
 	}
 	if _, err := n.store.CreateSnapshot(n.lastApplied, term); err != nil {
-		n.logger.Error("failed to create snapshot", map[string]any{"error": err.Error()})
+		n.logger.Error("failed to create snapshot", "error", err)
 		return
 	}
-	n.logger.Info("snapshot created", map[string]any{"index": n.lastApplied, "term": term})
+	n.logger.Info("snapshot created", "index", n.lastApplied, "term", term)
 }
 
 func (n *Node) WaitForLeader(ctx context.Context) (string, error) {

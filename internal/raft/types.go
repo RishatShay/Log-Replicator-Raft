@@ -3,6 +3,7 @@ package raft
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/RishatShay/sna-final-project/internal/config"
@@ -31,6 +32,7 @@ type Options struct {
 	ElectionMax       time.Duration
 	HeartbeatInterval time.Duration
 	SnapshotThreshold uint64
+	Logger            *slog.Logger
 }
 
 func OptionsFromConfig(cfg config.Config) Options {

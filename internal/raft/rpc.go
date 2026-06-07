@@ -232,11 +232,7 @@ func (n *Node) Write(ctx context.Context, req *raftpb.WriteRequest) (*raftpb.Wri
 		}
 		if n.commitIndex >= entry.Index {
 			n.mu.Unlock()
-			n.logger.Info("client write committed", map[string]any{
-				"key":   req.GetKey(),
-				"index": entry.Index,
-				"term":  term,
-			})
+			n.logger.Info("client write committed", "key", req.GetKey(), "index", entry.Index, "term", term)
 			return &raftpb.WriteResponse{LeaderId: n.id, Index: entry.Index, Term: term}, nil
 		}
 		majority := n.majorityLocked()
@@ -296,7 +292,7 @@ func (n *Node) Read(ctx context.Context, req *raftpb.ReadRequest) (*raftpb.ReadR
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "key %q does not exist", req.GetKey())
 	}
-	n.logger.Info("client read served", map[string]any{"key": req.GetKey()})
+	n.logger.Info("client read served", "key", req.GetKey())
 	return &raftpb.ReadResponse{LeaderId: n.id, Value: value}, nil
 }
 
