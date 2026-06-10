@@ -1,3 +1,5 @@
+// Package raft implements a Raft node: leader election, log replication,
+// snapshot installation and a replicated key/value state machine on top of it.
 package raft
 
 import (
@@ -10,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/RishatShay/sna-final-project/internal/metrics"
@@ -21,17 +22,23 @@ import (
 )
 
 const (
-	defaultElectionMin       = 500 * time.Millisecond
-	defaultElectionMax       = 900 * time.Millisecond
-	defaultHeartbeatInterval = 100 * time.Millisecond
-	appendBatchSize          = 128
+	defaultMinElectionTimeout = 500 * time.Millisecond
+	defaultMaxElectionTimeout = 900 * time.Millisecond
+	defaultHeartbeatInterval  = 100 * time.Millisecond
+
+	// electionTick is how often a follower checks its election deadline.
+	electionTick = 25 * time.Millisecond
+	// rpcTimeout bounds a single consensus RPC.
+	rpcTimeout = 500 * time.Millisecond
+	// appendBatchSize limits how many entries travel in one AppendEntries call.
+	appendBatchSize = 128
 )
 
+// Node is a single member of the cluster. It serves both gRPC services: the
+// consensus API used by other nodes and the key/value API used by clients.
 type Node struct {
 	raftpb.UnimplementedRaftServiceServer
 	raftpb.UnimplementedClientServiceServer
-
-	mu sync.Mutex
 
 	id       string
 	grpcAddr string
@@ -39,50 +46,59 @@ type Node struct {
 	peers    []Peer
 
 	store   *storage.Store
-	logger  *slog.Logger
+	log     *slog.Logger
 	metrics *metrics.Metrics
-
-	role        Role
-	currentTerm uint64
-	votedFor    string
-	leaderID    string
-
-	commitIndex uint64
-	lastApplied uint64
-	nextIndex   map[string]uint64
-	matchIndex  map[string]uint64
 
 	electionMin       time.Duration
 	electionMax       time.Duration
-	heartbeatInterval time.Duration
+	heartbeat         time.Duration
 	snapshotThreshold uint64
-	electionDeadline  time.Time
+
+	// mu guards the Raft state below and every store access.
+	mu               sync.Mutex
+	role             Role
+	currentTerm      uint64
+	votedFor         string
+	leaderID         string
+	commitIndex      uint64
+	lastApplied      uint64
+	nextIndex        map[string]uint64
+	matchIndex       map[string]uint64
+	electionDeadline time.Time
+
+	conns       map[string]*grpc.ClientConn
+	raftClients map[string]raftpb.RaftServiceClient
+	kvClients   map[string]raftpb.ClientServiceClient
+	// replicateNow wakes up the replication loop of a peer ahead of its heartbeat.
+	replicateNow map[string]chan struct{}
+	// sendMu serialises replication to a peer so rounds cannot interleave.
+	sendMu map[string]*sync.Mutex
 
 	grpcServer *grpc.Server
 	httpServer *http.Server
-	conns      map[string]*grpc.ClientConn
-	clients    map[string]raftpb.RaftServiceClient
-	apiClients map[string]raftpb.ClientServiceClient
 
-	stop     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	workers  sync.WaitGroup
 	stopOnce sync.Once
 }
 
+// New opens the data directory and restores the persistent Raft state.
 func New(opts Options) (*Node, error) {
 	if opts.NodeID == "" {
 		return nil, errors.New("node id is required")
 	}
 	if opts.GRPCAddr == "" {
-		return nil, errors.New("gRPC address is required")
+		return nil, errors.New("grpc address is required")
 	}
 	if opts.DataDir == "" {
-		return nil, errors.New("data dir is required")
+		return nil, errors.New("data directory is required")
 	}
 	if opts.ElectionMin == 0 {
-		opts.ElectionMin = defaultElectionMin
+		opts.ElectionMin = defaultMinElectionTimeout
 	}
 	if opts.ElectionMax == 0 {
-		opts.ElectionMax = defaultElectionMax
+		opts.ElectionMax = defaultMaxElectionTimeout
 	}
 	if opts.HeartbeatInterval == 0 {
 		opts.HeartbeatInterval = defaultHeartbeatInterval
@@ -106,14 +122,19 @@ func New(opts Options) (*Node, error) {
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	node := &Node{
 		id:                opts.NodeID,
 		grpcAddr:          opts.GRPCAddr,
 		httpAddr:          opts.HTTPAddr,
 		peers:             opts.Peers,
 		store:             store,
-		logger:            opts.Logger.With("node_id", opts.NodeID),
+		log:               opts.Logger.With("node_id", opts.NodeID),
 		metrics:           metrics.New(opts.NodeID),
+		electionMin:       opts.ElectionMin,
+		electionMax:       opts.ElectionMax,
+		heartbeat:         opts.HeartbeatInterval,
+		snapshotThreshold: opts.SnapshotThreshold,
 		role:              RoleFollower,
 		currentTerm:       term,
 		votedFor:          votedFor,
@@ -121,574 +142,228 @@ func New(opts Options) (*Node, error) {
 		lastApplied:       lastApplied,
 		nextIndex:         map[string]uint64{},
 		matchIndex:        map[string]uint64{},
-		electionMin:       opts.ElectionMin,
-		electionMax:       opts.ElectionMax,
-		heartbeatInterval: opts.HeartbeatInterval,
-		snapshotThreshold: opts.SnapshotThreshold,
 		conns:             map[string]*grpc.ClientConn{},
-		clients:           map[string]raftpb.RaftServiceClient{},
-		apiClients:        map[string]raftpb.ClientServiceClient{},
-		stop:              make(chan struct{}),
+		raftClients:       map[string]raftpb.RaftServiceClient{},
+		kvClients:         map[string]raftpb.ClientServiceClient{},
+		replicateNow:      map[string]chan struct{}{},
+		sendMu:            map[string]*sync.Mutex{},
+		ctx:               ctx,
+		cancel:            cancel,
 	}
+	for _, peer := range opts.Peers {
+		node.replicateNow[peer.ID] = make(chan struct{}, 1)
+		node.sendMu[peer.ID] = &sync.Mutex{}
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
 	node.resetElectionDeadlineLocked()
-	node.refreshMetricsLocked()
+	node.publishStateLocked()
 	return node, nil
 }
 
+// Start dials the peers, serves both gRPC services and starts the background
+// election and replication loops.
 func (n *Node) Start() error {
-	n.mu.Lock()
-	for _, peer := range n.peers {
-		conn, err := grpc.NewClient(dialTarget(peer.Address), grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			n.mu.Unlock()
-			return err
-		}
-		n.conns[peer.ID] = conn
-		n.clients[peer.ID] = raftpb.NewRaftServiceClient(conn)
-		n.apiClients[peer.ID] = raftpb.NewClientServiceClient(conn)
-	}
-	n.mu.Unlock()
-
-	lis, err := net.Listen("tcp", n.grpcAddr)
-	if err != nil {
+	if err := n.dialPeers(); err != nil {
 		return err
+	}
+
+	listener, err := net.Listen("tcp", n.grpcAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", n.grpcAddr, err)
 	}
 	n.grpcServer = grpc.NewServer()
 	raftpb.RegisterRaftServiceServer(n.grpcServer, n)
 	raftpb.RegisterClientServiceServer(n.grpcServer, n)
+	n.log.Info("grpc server started", "addr", n.grpcAddr, "peers", len(n.peers))
 	go func() {
-		n.logger.Info("grpc server started", "addr", n.grpcAddr)
-		if err := n.grpcServer.Serve(lis); err != nil {
-			n.logger.Warn("grpc server stopped", "error", err)
+		if err := n.grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			n.log.Error("grpc server stopped", "error", err)
 		}
 	}()
 
 	if n.httpAddr != "" {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", n.metrics.Handler())
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("ok\n"))
-		})
-		n.httpServer = &http.Server{Addr: n.httpAddr, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
-		go func() {
-			n.logger.Info("http server started", "addr", n.httpAddr)
-			if err := n.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				n.logger.Warn("http server stopped", "error", err)
-			}
-		}()
+		n.startHTTPServer()
 	}
 
-	go n.run()
+	n.startWorker(n.runElectionTimer)
+	for _, peer := range n.peers {
+		peer := peer
+		n.startWorker(func() { n.runReplication(peer) })
+	}
 	return nil
 }
 
+// Stop shuts the servers down and closes the store. It is safe to call twice.
 func (n *Node) Stop(ctx context.Context) error {
 	var err error
 	n.stopOnce.Do(func() {
-		close(n.stop)
+		n.cancel()
 		if n.grpcServer != nil {
-			stopped := make(chan struct{})
-			go func() {
-				n.grpcServer.GracefulStop()
-				close(stopped)
-			}()
-			select {
-			case <-stopped:
-			case <-ctx.Done():
-				n.grpcServer.Stop()
-				err = ctx.Err()
-			}
+			err = stopGRPCServer(ctx, n.grpcServer)
 		}
 		if n.httpServer != nil {
-			if shutdownErr := n.httpServer.Shutdown(ctx); shutdownErr != nil && err == nil {
-				err = shutdownErr
-			}
+			err = errors.Join(err, n.httpServer.Shutdown(ctx))
 		}
+		n.workers.Wait()
 		for _, conn := range n.conns {
-			if closeErr := conn.Close(); closeErr != nil && err == nil {
-				err = closeErr
-			}
+			err = errors.Join(err, conn.Close())
 		}
-		if closeErr := n.store.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		err = errors.Join(err, n.store.Close())
 	})
 	return err
 }
 
-func (n *Node) run() {
-	ticker := time.NewTicker(25 * time.Millisecond)
+// ID returns the node id.
+func (n *Node) ID() string {
+	return n.id
+}
+
+// Leader returns the leader this node knows about and whether that is the node
+// itself. The id is empty while no leader is known.
+func (n *Node) Leader() (id string, isSelf bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.role == RoleLeader {
+		return n.id, true
+	}
+	return n.leaderID, false
+}
+
+func (n *Node) dialPeers() error {
+	for _, peer := range n.peers {
+		conn, err := grpc.NewClient(dialTarget(peer.Address), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("create client for %s: %w", peer.ID, err)
+		}
+		n.conns[peer.ID] = conn
+		n.raftClients[peer.ID] = raftpb.NewRaftServiceClient(conn)
+		n.kvClients[peer.ID] = raftpb.NewClientServiceClient(conn)
+	}
+	return nil
+}
+
+func (n *Node) startHTTPServer() {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", n.metrics.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+
+	n.httpServer = &http.Server{Addr: n.httpAddr, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	n.log.Info("http server started", "addr", n.httpAddr)
+	go func() {
+		if err := n.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			n.log.Error("http server stopped", "error", err)
+		}
+	}()
+}
+
+func (n *Node) startWorker(fn func()) {
+	n.workers.Add(1)
+	go func() {
+		defer n.workers.Done()
+		fn()
+	}()
+}
+
+// runElectionTimer starts an election whenever no leader has been heard from for
+// longer than the randomized election timeout.
+func (n *Node) runElectionTimer() {
+	ticker := time.NewTicker(electionTick)
 	defer ticker.Stop()
 
-	nextHeartbeat := time.Now().Add(n.heartbeatInterval)
 	for {
 		select {
-		case <-n.stop:
+		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			now := time.Now()
-			n.mu.Lock()
-			role := n.role
-			electionDue := role != RoleLeader && now.After(n.electionDeadline)
-			heartbeatDue := role == RoleLeader && !now.Before(nextHeartbeat)
-			if heartbeatDue {
-				nextHeartbeat = now.Add(n.heartbeatInterval)
-			}
-			n.mu.Unlock()
-
-			if electionDue {
-				go n.startElection()
-			}
-			if heartbeatDue {
-				go n.replicateAllOnce(context.Background())
+			if n.electionDue() {
+				n.startElection()
 			}
 		}
 	}
 }
 
-func (n *Node) startElection() {
+func (n *Node) electionDue() bool {
 	n.mu.Lock()
-	if n.role == RoleLeader {
-		n.mu.Unlock()
-		return
-	}
-	n.role = RoleCandidate
-	n.currentTerm++
-	term := n.currentTerm
-	n.votedFor = n.id
-	n.leaderID = ""
-	if err := n.store.SaveTermVote(n.currentTerm, n.votedFor); err != nil {
-		n.logger.Error("failed to persist election term", "error", err)
-		n.resetElectionDeadlineLocked()
-		n.mu.Unlock()
-		return
-	}
-	lastLogIndex, lastLogTerm, err := n.store.LastIndexAndTerm()
-	if err != nil {
-		n.logger.Error("failed to read last log for election", "error", err)
-		n.resetElectionDeadlineLocked()
-		n.mu.Unlock()
-		return
-	}
-	n.resetElectionDeadlineLocked()
-	n.refreshMetricsLocked()
-	n.metrics.ElectionStarted()
-	majority := n.majorityLocked()
-	peers := append([]Peer(nil), n.peers...)
-	n.mu.Unlock()
-
-	n.logger.Info("election started", "term", term)
-	var votes int32 = 1
-	var won atomic.Bool
-	for _, peer := range peers {
-		peer := peer
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-			defer cancel()
-			resp, err := n.clients[peer.ID].RequestVote(ctx, &raftpb.RequestVoteRequest{
-				Term:         term,
-				CandidateId:  n.id,
-				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastLogTerm,
-			})
-			if err != nil {
-				return
-			}
-			n.mu.Lock()
-			defer n.mu.Unlock()
-			if resp.GetTerm() > n.currentTerm {
-				n.stepDownLocked(resp.GetTerm(), "")
-				return
-			}
-			if n.role != RoleCandidate || n.currentTerm != term || !resp.GetVoteGranted() {
-				return
-			}
-			if int(atomic.AddInt32(&votes, 1)) >= majority && won.CompareAndSwap(false, true) {
-				n.becomeLeaderLocked()
-			}
-		}()
-	}
-
-	if majority == 1 {
-		n.mu.Lock()
-		if n.role == RoleCandidate && n.currentTerm == term {
-			n.becomeLeaderLocked()
-		}
-		n.mu.Unlock()
-	}
+	defer n.mu.Unlock()
+	return n.role != RoleLeader && time.Now().After(n.electionDeadline)
 }
 
-func (n *Node) becomeLeaderLocked() {
-	lastIndex, _, err := n.store.LastIndexAndTerm()
-	if err != nil {
-		n.logger.Error("failed to initialize leader replication state", "error", err)
-		return
-	}
-	n.role = RoleLeader
-	n.leaderID = n.id
-	n.votedFor = n.id
-	for _, peer := range n.peers {
-		n.nextIndex[peer.ID] = lastIndex + 1
-		n.matchIndex[peer.ID] = 0
-		n.metrics.SetReplicationLag(peer.ID, lastIndex)
-	}
-	n.matchIndex[n.id] = lastIndex
-	n.refreshMetricsLocked()
-	n.logger.Info("became leader", "term", n.currentTerm)
-	go n.replicateAllOnce(context.Background())
+func (n *Node) isLeader() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.role == RoleLeader
 }
 
+// stepDownLocked turns the node into a follower of the given term.
 func (n *Node) stepDownLocked(term uint64, leaderID string) {
 	if term > n.currentTerm {
 		n.currentTerm = term
 		n.votedFor = ""
 		if err := n.store.SaveTermVote(n.currentTerm, n.votedFor); err != nil {
-			n.logger.Error("failed to persist higher term", "error", err)
+			n.log.Error("persist term", "error", err)
 		}
+	}
+	if n.role != RoleFollower {
+		n.log.Info("stepping down", "term", n.currentTerm, "leader_id", leaderID)
 	}
 	n.role = RoleFollower
 	n.leaderID = leaderID
 	n.resetElectionDeadlineLocked()
-	n.refreshMetricsLocked()
+	n.publishStateLocked()
 }
 
+// resetElectionDeadlineLocked picks the next election deadline. The random part
+// keeps nodes from starting elections at the same moment.
 func (n *Node) resetElectionDeadlineLocked() {
-	window := n.electionMax - n.electionMin
-	jitter := time.Duration(0)
-	if window > 0 {
-		jitter = time.Duration(rand.Int63n(int64(window)))
+	timeout := n.electionMin
+	if window := n.electionMax - n.electionMin; window > 0 {
+		timeout += time.Duration(rand.Int63n(int64(window)))
 	}
-	n.electionDeadline = time.Now().Add(n.electionMin + jitter)
+	n.electionDeadline = time.Now().Add(timeout)
 }
 
+// majorityLocked is the number of nodes, including this one, that have to agree.
 func (n *Node) majorityLocked() int {
 	return (len(n.peers)+1)/2 + 1
 }
 
-func (n *Node) refreshMetricsLocked() {
-	lastIndex, _, err := n.store.LastIndexAndTerm()
+// publishStateLocked mirrors the Raft state into the Prometheus metrics.
+func (n *Node) publishStateLocked() {
+	lastLogIndex, _, err := n.store.LastIndexAndTerm()
 	if err != nil {
-		lastIndex = 0
+		n.log.Error("read last log position", "error", err)
+		return
 	}
-	snapIndex, _, err := n.store.SnapshotIndexTerm()
+	snapshotIndex, _, err := n.store.SnapshotIndexTerm()
 	if err != nil {
-		snapIndex = 0
-	}
-	n.metrics.SetState(n.role == RoleLeader, n.currentTerm, n.commitIndex, n.lastApplied, lastIndex, snapIndex)
-}
-
-func (n *Node) replicateAllOnce(ctx context.Context) int {
-	n.mu.Lock()
-	if n.role != RoleLeader {
-		n.mu.Unlock()
-		return 0
-	}
-	peers := append([]Peer(nil), n.peers...)
-	n.mu.Unlock()
-
-	var successes int32 = 1
-	var wg sync.WaitGroup
-	for _, peer := range peers {
-		peer := peer
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if n.replicatePeer(ctx, peer.ID) {
-				atomic.AddInt32(&successes, 1)
-			}
-		}()
-	}
-	wg.Wait()
-	return int(successes)
-}
-
-func (n *Node) replicatePeer(ctx context.Context, peerID string) bool {
-	for attempt := 0; attempt < 64; attempt++ {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-		}
-
-		n.mu.Lock()
-		if n.role != RoleLeader {
-			n.mu.Unlock()
-			return false
-		}
-		client := n.clients[peerID]
-		term := n.currentTerm
-		leaderCommit := n.commitIndex
-		next := n.nextIndex[peerID]
-		if next == 0 {
-			next = 1
-			n.nextIndex[peerID] = next
-		}
-		snapIndex, snapTerm, err := n.store.SnapshotIndexTerm()
-		if err != nil {
-			n.logger.Error("failed to read snapshot metadata", "peer_id", peerID, "error", err)
-			n.mu.Unlock()
-			return false
-		}
-		if next <= snapIndex {
-			snapshot, err := n.store.LoadSnapshot()
-			if err != nil {
-				n.logger.Error("failed to load snapshot", "peer_id", peerID, "error", err)
-				n.mu.Unlock()
-				return false
-			}
-			n.mu.Unlock()
-
-			rpcCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-			resp, rpcErr := client.InstallSnapshot(rpcCtx, &raftpb.InstallSnapshotRequest{
-				Term:              term,
-				LeaderId:          n.id,
-				LastIncludedIndex: snapshot.LastIncludedIndex,
-				LastIncludedTerm:  snapshot.LastIncludedTerm,
-				Data:              snapshot.Data,
-			})
-			cancel()
-			if rpcErr != nil {
-				return false
-			}
-			n.mu.Lock()
-			if resp.GetTerm() > n.currentTerm {
-				n.stepDownLocked(resp.GetTerm(), "")
-				n.mu.Unlock()
-				return false
-			}
-			n.matchIndex[peerID] = snapshot.LastIncludedIndex
-			n.nextIndex[peerID] = snapshot.LastIncludedIndex + 1
-			n.advanceCommitLocked()
-			n.refreshMetricsLocked()
-			n.mu.Unlock()
-			return true
-		}
-
-		prevLogIndex := next - 1
-		prevLogTerm, ok, err := n.store.Term(prevLogIndex)
-		if err != nil {
-			n.logger.Error("failed to read previous log term", "peer_id", peerID, "error", err)
-			n.mu.Unlock()
-			return false
-		}
-		if !ok && prevLogIndex <= snapIndex {
-			prevLogTerm = snapTerm
-			ok = true
-		}
-		if !ok {
-			n.nextIndex[peerID] = maxUint64(1, next-1)
-			n.mu.Unlock()
-			continue
-		}
-		entries, err := n.store.EntriesFrom(next, appendBatchSize)
-		if err != nil {
-			n.logger.Error("failed to read entries for replication", "peer_id", peerID, "error", err)
-			n.mu.Unlock()
-			return false
-		}
-		reqEntries := make([]*raftpb.LogEntry, 0, len(entries))
-		lastSent := prevLogIndex
-		for _, entry := range entries {
-			reqEntries = append(reqEntries, &raftpb.LogEntry{Index: entry.Index, Term: entry.Term, Command: entry.Command})
-			lastSent = entry.Index
-		}
-		n.mu.Unlock()
-
-		rpcCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-		resp, rpcErr := client.AppendEntries(rpcCtx, &raftpb.AppendEntriesRequest{
-			Term:         term,
-			LeaderId:     n.id,
-			PrevLogIndex: prevLogIndex,
-			PrevLogTerm:  prevLogTerm,
-			Entries:      reqEntries,
-			LeaderCommit: leaderCommit,
-		})
-		cancel()
-		if rpcErr != nil {
-			return false
-		}
-
-		n.mu.Lock()
-		if resp.GetTerm() > n.currentTerm {
-			n.stepDownLocked(resp.GetTerm(), "")
-			n.mu.Unlock()
-			return false
-		}
-		if n.role != RoleLeader || n.currentTerm != term {
-			n.mu.Unlock()
-			return false
-		}
-		if resp.GetSuccess() {
-			match := resp.GetMatchIndex()
-			if match < lastSent {
-				match = lastSent
-			}
-			if match > n.matchIndex[peerID] {
-				n.matchIndex[peerID] = match
-			}
-			n.nextIndex[peerID] = n.matchIndex[peerID] + 1
-			lastIndex, _, _ := n.store.LastIndexAndTerm()
-			if lastIndex >= n.matchIndex[peerID] {
-				n.metrics.SetReplicationLag(peerID, lastIndex-n.matchIndex[peerID])
-			}
-			n.advanceCommitLocked()
-			n.refreshMetricsLocked()
-			n.mu.Unlock()
-			return true
-		}
-		if n.nextIndex[peerID] > 1 {
-			n.nextIndex[peerID]--
-		}
-		n.mu.Unlock()
-	}
-	return false
-}
-
-func (n *Node) advanceCommitLocked() {
-	lastIndex, _, err := n.store.LastIndexAndTerm()
-	if err != nil {
-		n.logger.Error("failed to read last log while advancing commit", "error", err)
+		n.log.Error("read snapshot position", "error", err)
 		return
 	}
-	majority := n.majorityLocked()
-	for idx := n.commitIndex + 1; idx <= lastIndex; idx++ {
-		term, ok, err := n.store.Term(idx)
-		if err != nil {
-			n.logger.Error("failed to read term while advancing commit", "error", err)
-			return
-		}
-		if !ok || term != n.currentTerm {
-			continue
-		}
-		count := 1
-		for _, peer := range n.peers {
-			if n.matchIndex[peer.ID] >= idx {
-				count++
-			}
-		}
-		if count >= majority {
-			n.commitIndex = idx
-		}
-	}
-	n.applyCommittedLocked()
+	n.metrics.SetState(n.role == RoleLeader, n.currentTerm, n.commitIndex, n.lastApplied, lastLogIndex, snapshotIndex)
 }
 
-func (n *Node) applyCommittedLocked() {
-	for n.lastApplied < n.commitIndex {
-		next := n.lastApplied + 1
-		entry, ok, err := n.store.Entry(next)
-		if err != nil {
-			n.logger.Error("failed to load committed entry", "index", next, "error", err)
-			return
-		}
-		if !ok {
-			snapIndex, _, err := n.store.SnapshotIndexTerm()
-			if err != nil {
-				n.logger.Error("failed to read snapshot metadata while applying", "error", err)
-				return
-			}
-			if next <= snapIndex {
-				n.lastApplied = snapIndex
-				continue
-			}
-			n.logger.Error("committed entry missing", "index", next)
-			return
-		}
-		cmd, err := decodeCommand(entry.Command)
-		if err != nil {
-			n.logger.Error("failed to decode command", "index", entry.Index, "error", err)
-			return
-		}
-		if cmd.Op == "delete" {
-			err = n.store.ApplyDelete(entry.Index, cmd.Key)
-		} else {
-			err = n.store.ApplySet(entry.Index, cmd.Key, cmd.Value)
-		}
-		if err != nil {
-			n.logger.Error("failed to apply command", "index", entry.Index, "error", err)
-			return
-		}
-		n.lastApplied = entry.Index
-	}
-	n.compactIfNeededLocked()
-	n.refreshMetricsLocked()
-}
+func stopGRPCServer(ctx context.Context, server *grpc.Server) error {
+	stopped := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(stopped)
+	}()
 
-func (n *Node) compactIfNeededLocked() {
-	if n.snapshotThreshold == 0 || n.lastApplied == 0 {
-		return
-	}
-	snapIndex, _, err := n.store.SnapshotIndexTerm()
-	if err != nil {
-		n.logger.Error("failed to read snapshot metadata for compaction", "error", err)
-		return
-	}
-	if n.lastApplied <= snapIndex || n.lastApplied-snapIndex < n.snapshotThreshold {
-		return
-	}
-	term, ok, err := n.store.Term(n.lastApplied)
-	if err != nil {
-		n.logger.Error("failed to read snapshot term", "error", err)
-		return
-	}
-	if !ok {
-		return
-	}
-	if _, err := n.store.CreateSnapshot(n.lastApplied, term); err != nil {
-		n.logger.Error("failed to create snapshot", "error", err)
-		return
-	}
-	n.logger.Info("snapshot created", "index", n.lastApplied, "term", term)
-}
-
-func (n *Node) WaitForLeader(ctx context.Context) (string, error) {
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		n.mu.Lock()
-		leaderID := n.leaderID
-		if n.role == RoleLeader {
-			leaderID = n.id
-		}
-		n.mu.Unlock()
-		if leaderID != "" {
-			return leaderID, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-func (n *Node) ID() string {
-	return n.id
-}
-
-func minUint64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxUint64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func wrapInternal(err error) error {
-	if err == nil {
+	select {
+	case <-stopped:
 		return nil
+	case <-ctx.Done():
+		server.Stop()
+		return ctx.Err()
 	}
-	return fmt.Errorf("internal raft error: %w", err)
 }
 
-// dialTarget keeps plain host:port addresses working with the gRPC resolver,
-// which otherwise treats "node1:9001" as a custom scheme.
+// dialTarget keeps plain host:port addresses working with the gRPC name
+// resolver, which otherwise treats "node1:9001" as a custom scheme.
 func dialTarget(address string) string {
 	if strings.Contains(address, "://") {
 		return address

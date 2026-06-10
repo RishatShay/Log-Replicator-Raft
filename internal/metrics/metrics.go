@@ -3,6 +3,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -23,6 +24,8 @@ type Metrics struct {
 	elections      prometheus.Counter
 	rpcs           *prometheus.CounterVec
 	replicationLag *prometheus.GaugeVec
+	commitLatency  prometheus.Histogram
+	applyLatency   prometheus.Histogram
 }
 
 func New(nodeID string) *Metrics {
@@ -68,6 +71,16 @@ func New(nodeID string) *Metrics {
 			Name: "raft_replication_lag_entries",
 			Help: "Entries the leader still has to ship to a peer.",
 		}, []string{"peer_id"}),
+		commitLatency: factory.NewHistogram(prometheus.HistogramOpts{
+			Name:    "raft_commit_latency_seconds",
+			Help:    "Time from appending a client entry to committing it.",
+			Buckets: prometheus.DefBuckets,
+		}),
+		applyLatency: factory.NewHistogram(prometheus.HistogramOpts{
+			Name:    "raft_apply_latency_seconds",
+			Help:    "Time from committing an entry to applying it to the state machine.",
+			Buckets: prometheus.DefBuckets,
+		}),
 	}
 }
 
@@ -101,4 +114,12 @@ func (m *Metrics) RPCHandled(method, result string) {
 
 func (m *Metrics) SetReplicationLag(peerID string, entries uint64) {
 	m.replicationLag.WithLabelValues(peerID).Set(float64(entries))
+}
+
+func (m *Metrics) CommitLatency(d time.Duration) {
+	m.commitLatency.Observe(d.Seconds())
+}
+
+func (m *Metrics) ApplyLatency(d time.Duration) {
+	m.applyLatency.Observe(d.Seconds())
 }

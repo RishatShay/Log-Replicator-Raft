@@ -1,14 +1,13 @@
 package raft
 
 import (
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/RishatShay/sna-final-project/internal/config"
 )
 
+// Role is the Raft role of a node.
 type Role string
 
 const (
@@ -17,17 +16,20 @@ const (
 	RoleLeader    Role = "leader"
 )
 
+// Peer is another node of the cluster.
 type Peer struct {
 	ID      string
 	Address string
 }
 
+// Options configures a node. Only NodeID, GRPCAddr and DataDir are required.
 type Options struct {
-	NodeID            string
-	GRPCAddr          string
-	HTTPAddr          string
-	DataDir           string
-	Peers             []Peer
+	NodeID   string
+	GRPCAddr string
+	HTTPAddr string
+	DataDir  string
+	Peers    []Peer
+
 	ElectionMin       time.Duration
 	ElectionMax       time.Duration
 	HeartbeatInterval time.Duration
@@ -51,29 +53,4 @@ func OptionsFromConfig(cfg config.Config) Options {
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		SnapshotThreshold: cfg.SnapshotThreshold,
 	}
-}
-
-type command struct {
-	Op    string `json:"op"`
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-func encodeSetCommand(key, value string) ([]byte, error) {
-	return json.Marshal(command{Op: "set", Key: key, Value: value})
-}
-
-func encodeDeleteCommand(key string) ([]byte, error) {
-	return json.Marshal(command{Op: "delete", Key: key})
-}
-
-func decodeCommand(raw []byte) (command, error) {
-	var cmd command
-	if err := json.Unmarshal(raw, &cmd); err != nil {
-		return command{}, err
-	}
-	if cmd.Op != "set" && cmd.Op != "delete" {
-		return command{}, errors.New("unsupported command")
-	}
-	return cmd, nil
 }
