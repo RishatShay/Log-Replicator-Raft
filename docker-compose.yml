@@ -1,89 +1,86 @@
+x-node-env: &node-env
+  RAFT_GRPC_ADDR: ":9001"
+  RAFT_HTTP_ADDR: ":8001"
+  RAFT_DATA_DIR: /data
+  RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
+  RAFT_LOG_LEVEL: ${RAFT_LOG_LEVEL:-info}
+  RAFT_SNAPSHOT_THRESHOLD: ${RAFT_SNAPSHOT_THRESHOLD:-10000}
+
+x-node: &node
+  build: .
+  restart: unless-stopped
+  networks: [raft]
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8001/healthz"]
+    interval: 5s
+    timeout: 2s
+    retries: 5
+
 services:
   node1:
-    build: .
+    <<: *node
     container_name: sna-node1
     environment:
+      <<: *node-env
       NODE_ID: node1
-      RAFT_GRPC_ADDR: :9001
-      RAFT_HTTP_ADDR: :8001
-      RAFT_DATA_DIR: /data
-      RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
     ports:
       - "9001:9001"
       - "8001:8001"
     volumes:
-      - ./data/node1:/data
-    networks: [raft]
+      - node1-data:/data
 
   node2:
-    build: .
+    <<: *node
     container_name: sna-node2
     environment:
+      <<: *node-env
       NODE_ID: node2
-      RAFT_GRPC_ADDR: :9001
-      RAFT_HTTP_ADDR: :8001
-      RAFT_DATA_DIR: /data
-      RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
     ports:
       - "9002:9001"
       - "8002:8001"
     volumes:
-      - ./data/node2:/data
-    networks: [raft]
+      - node2-data:/data
 
   node3:
-    build: .
+    <<: *node
     container_name: sna-node3
     environment:
+      <<: *node-env
       NODE_ID: node3
-      RAFT_GRPC_ADDR: :9001
-      RAFT_HTTP_ADDR: :8001
-      RAFT_DATA_DIR: /data
-      RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
     ports:
       - "9003:9001"
       - "8003:8001"
     volumes:
-      - ./data/node3:/data
-    networks: [raft]
+      - node3-data:/data
 
   node4:
-    build: .
+    <<: *node
     container_name: sna-node4
     environment:
+      <<: *node-env
       NODE_ID: node4
-      RAFT_GRPC_ADDR: :9001
-      RAFT_HTTP_ADDR: :8001
-      RAFT_DATA_DIR: /data
-      RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
     ports:
       - "9004:9001"
       - "8004:8001"
     volumes:
-      - ./data/node4:/data
-    networks: [raft]
+      - node4-data:/data
 
   node5:
-    build: .
+    <<: *node
     container_name: sna-node5
     environment:
+      <<: *node-env
       NODE_ID: node5
-      RAFT_GRPC_ADDR: :9001
-      RAFT_HTTP_ADDR: :8001
-      RAFT_DATA_DIR: /data
-      RAFT_PEERS: node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001
     ports:
       - "9005:9001"
       - "8005:8001"
     volumes:
-      - ./data/node5:/data
-    networks: [raft]
+      - node5-data:/data
 
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: sna-prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
     ports:
       - "9090:9090"
     volumes:
@@ -93,7 +90,7 @@ services:
   loki:
     image: grafana/loki:3.1.0
     container_name: sna-loki
-    command: -config.file=/etc/loki/local-config.yml
+    command: ["-config.file=/etc/loki/local-config.yml"]
     ports:
       - "3100:3100"
     volumes:
@@ -103,8 +100,9 @@ services:
   promtail:
     image: grafana/promtail:3.1.0
     container_name: sna-promtail
-    command: -config.file=/etc/promtail/config.yml
+    command: ["-config.file=/etc/promtail/config.yml"]
     user: root
+    depends_on: [loki]
     volumes:
       - ./deployments/promtail/config.yml:/etc/promtail/config.yml:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
@@ -114,22 +112,21 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     container_name: sna-grafana
+    depends_on: [prometheus, loki]
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-
-    # SMTP для Gmail
-      GF_SMTP_ENABLED: "true"
-      GF_SMTP_HOST: smtp.gmail.com:587
-      GF_SMTP_USER: rishatshayhut@gmail.com
-      GF_SMTP_PASSWORD: password # <-- replace with your email password 
-      GF_SMTP_FROM_ADDRESS: rishatshayhut@gmail.com
-      GF_SMTP_SKIP_VERIFY: "false"
-
+      # Email alerts stay disabled until the SMTP block is filled in, see .env.example.
+      ALERT_EMAIL: ${ALERT_EMAIL:-alerts@example.com}
+      GF_SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${SMTP_HOST:-}
+      GF_SMTP_USER: ${SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
     volumes:
       - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -138,3 +135,10 @@ services:
 networks:
   raft:
     driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
