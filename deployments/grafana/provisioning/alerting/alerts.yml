@@ -7,74 +7,73 @@ groups:
     interval: 30s
     rules:
       - uid: raft_node_down
-        title: Raft node down
+        title: Raft node is down
         condition: A
-        data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
-            datasourceUid: Prometheus
-            model:
-              expr: up{job="raft"} == 0
-              instant: true
-              refId: A
+        for: 2m
         noDataState: OK
         execErrState: Error
-        for: 2m
+        annotations:
+          summary: A Raft node stopped answering scrapes
+          description: The cluster still has quorum, but it lost one replica.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              refId: A
+              instant: true
+              expr: up{job="raft"} == 0
 
       - uid: raft_no_leader
         title: Raft cluster has no leader
         condition: A
-        data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
-            datasourceUid: Prometheus
-            model:
-              expr: sum(raft_is_leader) != 1
-              instant: true
-              refId: A
-        noDataState: OK
-        execErrState: Error
         for: 2m
-      - uid: raft_2_nodes_down
-        title: "Raft: 2 nodes down"
-        condition: A
-        data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
-            datasourceUid: Prometheus
-            model:
-              expr: count(up{job="raft"} == 0) >= 2
-              instant: true
-              refId: A
         noDataState: OK
         execErrState: Error
-        for: 1m
         annotations:
-          summary: "Raft nodes are unreachable"
-          description: "Quorum is at risk. Immediate attention required."
+          summary: The cluster has no single leader
+          description: Writes are rejected until an election succeeds.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(raft_is_leader) != 1
 
-      - uid: raft_3_nodes_down
-        title: "Raft: 3 nodes down (QUORUM LOST)"
+      - uid: raft_quorum_at_risk
+        title: Raft quorum is at risk
         condition: A
-        data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
-            datasourceUid: Prometheus
-            model:
-              expr: count(up{job="raft"} == 0) >= 3
-              instant: true
-              refId: A
+        for: 1m
         noDataState: OK
         execErrState: Error
-        for: 30s
         annotations:
-          summary: "QUORUM LOST! 3+ nodes down"
-          description: "Cluster cannot commit writes. Full failover in progress."
+          summary: Two of five nodes are unreachable
+          description: One more failure stops the cluster from committing writes.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              refId: A
+              instant: true
+              expr: count(up{job="raft"} == 0) >= 2
+
+      - uid: raft_quorum_lost
+        title: Raft quorum is lost
+        condition: A
+        for: 30s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: Three or more nodes are down
+          description: The cluster cannot commit writes until nodes come back.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              refId: A
+              instant: true
+              expr: count(up{job="raft"} == 0) >= 3

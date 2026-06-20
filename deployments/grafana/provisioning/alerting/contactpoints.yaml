@@ -1,11 +1,13 @@
 apiVersion: 1
+
 contactPoints:
   - orgId: 1
-    name: gmail-alerts
+    name: email-alerts
     receivers:
-      - uid: email-gmail
+      - uid: email-default
         type: email
         disableResolveMessage: false
         settings:
-          addresses: "ilya.syaglovv@gmail.com"  # ← Почта куда будут приходить уведомления
+          # Set ALERT_EMAIL in .env, see .env.example.
+          addresses: $ALERT_EMAIL
           singleEmail: false

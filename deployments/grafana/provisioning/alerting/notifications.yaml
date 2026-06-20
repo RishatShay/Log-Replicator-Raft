@@ -2,15 +2,8 @@ apiVersion: 1
 
 policies:
   - orgId: 1
-    receiver: gmail-alerts
-    group_by: ['grafana_folder', 'alertname']
+    receiver: email-alerts
+    group_by: ["grafana_folder", "alertname"]
     group_wait: 10s
     group_interval: 30s
     repeat_interval: 10m
-    routes:
-      - receiver: gmail-alerts
-        matchers:
-          - 'alertname="Raft: 2 nodes down"'
-      - receiver: gmail-alerts
-        matchers:
-          - 'alertname="Raft: 3 nodes down (QUORUM LOST)"'
