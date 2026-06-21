@@ -9,30 +9,29 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  - job_name: docker
+  - job_name: raft-nodes
     docker_sd_configs:
       - host: unix:///var/run/docker.sock
         refresh_interval: 5s
-    
-    relabel_configs:
-      - source_labels: ['__meta_docker_container_name']
-        regex: '/(sna-node[0-9]+)'
-        target_label: 'container'
-        replacement: '$1'
 
-      - source_labels: ['__meta_docker_container_name']
-        regex: '/sna-node[0-9]+'
+    relabel_configs:
+      # Only the Raft containers, the monitoring stack logs itself.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/sna-node[0-9]+"
         action: keep
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(sna-node[0-9]+)"
+        target_label: "container"
+        replacement: "$1"
 
     pipeline_stages:
       - docker: {}
-      
+      # The node logs JSON through log/slog: {"time":..,"level":..,"msg":..,"node_id":..}
       - json:
           expressions:
             level: level
-            message: message
+            message: msg
             node_id: node_id
-            
       - labels:
           level:
           node_id:
