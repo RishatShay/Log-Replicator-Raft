@@ -1,8 +1,12 @@
 .git
 .github
-data
+.env
 bin
-dist
+data
+docs
+deployments
+scripts
+*.md
 *.db
 *.db-shm
 *.db-wal

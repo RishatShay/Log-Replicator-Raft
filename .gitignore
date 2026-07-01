@@ -1,10 +1,9 @@
-.idea/
-.vscode/
-*.log
+bin/
+data/
+.env
+coverage.out
 *.db
 *.db-shm
 *.db-wal
-bin/
-data/
-dist/
-coverage.out
+.idea/
+.vscode/
