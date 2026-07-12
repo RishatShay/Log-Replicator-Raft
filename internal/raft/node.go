@@ -65,6 +65,9 @@ type Node struct {
 	nextIndex        map[string]uint64
 	matchIndex       map[string]uint64
 	electionDeadline time.Time
+	// unreachable remembers which peers stopped answering, so the leader logs a
+	// failing peer once instead of once per request.
+	unreachable map[string]bool
 
 	conns       map[string]*grpc.ClientConn
 	raftClients map[string]raftpb.RaftServiceClient
@@ -142,6 +145,7 @@ func New(opts Options) (*Node, error) {
 		lastApplied:       lastApplied,
 		nextIndex:         map[string]uint64{},
 		matchIndex:        map[string]uint64{},
+		unreachable:       map[string]bool{},
 		conns:             map[string]*grpc.ClientConn{},
 		raftClients:       map[string]raftpb.RaftServiceClient{},
 		kvClients:         map[string]raftpb.ClientServiceClient{},

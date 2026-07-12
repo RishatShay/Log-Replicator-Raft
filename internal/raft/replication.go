@@ -137,7 +137,7 @@ func (n *Node) sendEntries(ctx context.Context, peerID string) appendOutcome {
 	defer cancel()
 	reply, err := n.raftClients[peerID].AppendEntries(rpcCtx, req)
 	if err != nil {
-		n.log.Warn("append entries failed", "peer_id", peerID, "error", err)
+		n.notePeerUnreachable(peerID, "append entries failed", err)
 		return appendFailed
 	}
 	if n.observeHigherTerm(reply.GetTerm()) {
@@ -146,6 +146,7 @@ func (n *Node) sendEntries(ctx context.Context, peerID string) appendOutcome {
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.notePeerReachableLocked(peerID)
 	if n.role != RoleLeader || n.currentTerm != term {
 		return appendFailed
 	}
@@ -214,7 +215,7 @@ func (n *Node) sendSnapshot(ctx context.Context, peerID string) bool {
 		Data:              snapshot.Data,
 	})
 	if err != nil {
-		n.log.Warn("install snapshot failed", "peer_id", peerID, "error", err)
+		n.notePeerUnreachable(peerID, "install snapshot failed", err)
 		return false
 	}
 	if n.observeHigherTerm(reply.GetTerm()) {
@@ -223,6 +224,7 @@ func (n *Node) sendSnapshot(ctx context.Context, peerID string) bool {
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.notePeerReachableLocked(peerID)
 	if n.role != RoleLeader || n.currentTerm != term {
 		return false
 	}
@@ -378,6 +380,25 @@ func (n *Node) recordPeerProgressLocked(peerID string, matchIndex uint64) {
 		return
 	}
 	n.metrics.SetReplicationLag(peerID, lastLogIndex-min(lastLogIndex, n.matchIndex[peerID]))
+}
+
+// notePeerUnreachable logs a failing peer once, until it answers again.
+func (n *Node) notePeerUnreachable(peerID, what string, cause error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.unreachable[peerID] {
+		return
+	}
+	n.unreachable[peerID] = true
+	n.log.Warn(what, "peer_id", peerID, "error", cause)
+}
+
+func (n *Node) notePeerReachableLocked(peerID string) {
+	if !n.unreachable[peerID] {
+		return
+	}
+	delete(n.unreachable, peerID)
+	n.log.Info("peer answers again", "peer_id", peerID)
 }
 
 // nextIndexLocked returns the next index to send to a peer, never below 1.
