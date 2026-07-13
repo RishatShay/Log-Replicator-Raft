@@ -314,6 +314,11 @@ func (n *Node) stepDownLocked(term uint64, leaderID string) {
 	if n.role != RoleFollower {
 		n.log.Info("stepping down", "term", n.currentTerm, "leader_id", leaderID)
 	}
+	if n.role == RoleLeader {
+		// The lag series belongs to the leader, so drop it instead of leaving
+		// stale values in the dashboards.
+		n.metrics.ClearReplicationLag()
+	}
 	n.role = RoleFollower
 	n.leaderID = leaderID
 	n.resetElectionDeadlineLocked()

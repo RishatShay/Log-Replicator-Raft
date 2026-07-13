@@ -116,6 +116,11 @@ func (m *Metrics) SetReplicationLag(peerID string, entries uint64) {
 	m.replicationLag.WithLabelValues(peerID).Set(float64(entries))
 }
 
+// ClearReplicationLag drops the per-peer lag series, which only a leader owns.
+func (m *Metrics) ClearReplicationLag() {
+	m.replicationLag.Reset()
+}
+
 func (m *Metrics) CommitLatency(d time.Duration) {
 	m.commitLatency.Observe(d.Seconds())
 }
