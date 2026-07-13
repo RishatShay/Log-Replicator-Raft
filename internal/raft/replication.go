@@ -151,7 +151,7 @@ func (n *Node) sendEntries(ctx context.Context, peerID string) appendOutcome {
 		return appendFailed
 	}
 	if !reply.GetSuccess() {
-		n.nextIndex[peerID] = max(n.nextIndexLocked(peerID)-1, 1)
+		n.nextIndex[peerID] = nextIndexAfterRejection(n.nextIndexLocked(peerID), reply.GetMatchIndex())
 		return appendRejected
 	}
 
@@ -404,6 +404,19 @@ func (n *Node) notePeerReachableLocked(peerID string) {
 // nextIndexLocked returns the next index to send to a peer, never below 1.
 func (n *Node) nextIndexLocked(peerID string) uint64 {
 	return max(n.nextIndex[peerID], 1)
+}
+
+// nextIndexAfterRejection picks the position to retry from. Followers report the
+// last index they hold, which lets the leader skip whole ranges instead of one
+// entry per round trip, or jump forward if the follower is ahead of our guess.
+func nextIndexAfterRejection(current, followerLastIndex uint64) uint64 {
+	if followerLastIndex >= current {
+		return followerLastIndex + 1
+	}
+	if current <= 1 {
+		return 1
+	}
+	return max(min(current-1, followerLastIndex+1), 1)
 }
 
 func lastEntryIndex(req *raftpb.AppendEntriesRequest) uint64 {
