@@ -71,7 +71,9 @@ func (n *Node) Read(ctx context.Context, req *raftpb.ReadRequest) (*raftpb.ReadR
 		return nil, err
 	}
 
+	n.mu.Lock()
 	value, found, err := n.store.Get(req.GetKey())
+	n.mu.Unlock()
 	if err != nil {
 		return nil, internalError(err)
 	}
