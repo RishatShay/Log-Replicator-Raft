@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // defaultCluster matches the ports published by docker-compose.yml.
@@ -62,7 +65,7 @@ func run(ctx context.Context, addr string, args []string) error {
 		}
 		return call(addr, func(client raftpb.ClientServiceClient) error {
 			resp, err := client.Write(ctx, &raftpb.WriteRequest{Key: args[0], Value: args[1]})
-			return printJSON(resp, err)
+			return printMessage(resp, err)
 		})
 	case "read":
 		if len(args) != 1 {
@@ -70,7 +73,7 @@ func run(ctx context.Context, addr string, args []string) error {
 		}
 		return call(addr, func(client raftpb.ClientServiceClient) error {
 			resp, err := client.Read(ctx, &raftpb.ReadRequest{Key: args[0]})
-			return printJSON(resp, err)
+			return printMessage(resp, err)
 		})
 	case "delete":
 		if len(args) != 1 {
@@ -78,12 +81,12 @@ func run(ctx context.Context, addr string, args []string) error {
 		}
 		return call(addr, func(client raftpb.ClientServiceClient) error {
 			resp, err := client.Delete(ctx, &raftpb.DeleteRequest{Key: args[0]})
-			return printJSON(resp, err)
+			return printMessage(resp, err)
 		})
 	case "status":
 		return call(addr, func(client raftpb.ClientServiceClient) error {
 			resp, err := client.Status(ctx, &raftpb.StatusRequest{})
-			return printJSON(resp, err)
+			return printMessage(resp, err)
 		})
 	case "log":
 		return call(addr, func(client raftpb.ClientServiceClient) error {
@@ -189,13 +192,22 @@ func call(addr string, fn func(client raftpb.ClientServiceClient) error) error {
 	return fn(raftpb.NewClientServiceClient(conn))
 }
 
-func printJSON(value any, err error) error {
+func printMessage(resp proto.Message, err error) error {
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
+	out, err := protojson.MarshalOptions{EmitUnpopulated: true, UseProtoNames: true}.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	// protojson jitters its own whitespace on purpose, so re-indent the output to
+	// keep it stable for humans and for jq.
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, out, "", "  "); err != nil {
+		return err
+	}
+	fmt.Println(pretty.String())
+	return nil
 }
 
 func printLog(address string, report *raftpb.InspectLogResponse) {
