@@ -1,122 +1,38 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": { "list": [] },
   "editable": true,
-  "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
   "id": null,
   "links": [],
   "panels": [
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Which node currently believes it is the leader. Exactly one line should be at 1.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "id": 1,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
       "targets": [
-        {
-          "expr": "raft_commit_index",
-          "legendFormat": "{{node_id}} commit",
-          "refId": "A"
-        },
-        {
-          "expr": "raft_last_applied",
-          "legendFormat": "{{node_id}} applied",
-          "refId": "B"
-        }
-      ],
-      "title": "Commit and Apply Progress",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "expr": "raft_is_leader",
-          "legendFormat": "{{node_id}}",
-          "refId": "A"
-        }
+        { "expr": "raft_is_leader", "legendFormat": "{{node_id}}", "refId": "A" }
       ],
       "title": "Leader",
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 8
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Commit index and applied index per node. Both should move together.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        { "expr": "raft_commit_index", "legendFormat": "{{node_id}} commit", "refId": "A" },
+        { "expr": "raft_last_applied", "legendFormat": "{{node_id}} applied", "refId": "B" }
+      ],
+      "title": "Commit and apply progress",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Entries the leader still has to ship to each follower.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "id": 3,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "expr": "raft_replication_lag_entries",
@@ -124,27 +40,82 @@
           "refId": "A"
         }
       ],
-      "title": "Replication Lag",
+      "title": "Replication lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "How long a client write waits for a majority, and how long applying it to the state machine takes.",
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(raft_commit_latency_seconds_bucket[5m])))",
+          "legendFormat": "commit p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(raft_apply_latency_seconds_bucket[5m])))",
+          "legendFormat": "apply p95",
+          "refId": "B"
+        }
+      ],
+      "title": "Write latency (p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Consensus RPCs served per second. Rejections and log mismatches show up during elections and recovery.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum by (method, result) (rate(raft_rpc_total[1m]))",
+          "legendFormat": "{{method}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Consensus RPCs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Elections started per node. A steady climb means the cluster cannot keep a leader.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "increase(raft_elections_total[5m])",
+          "legendFormat": "{{node_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Elections started (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Log index covered by the latest snapshot on each node.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 7,
+      "targets": [
+        { "expr": "raft_snapshot_index", "legendFormat": "{{node_id}}", "refId": "A" }
+      ],
+      "title": "Snapshot position",
       "type": "timeseries"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": [
-    "raft",
-    "sna"
-  ],
-  "templating": {
-    "list": []
-  },
-  "time": {
-    "from": "now-15m",
-    "to": "now"
-  },
-  "timepicker": {},
+  "tags": ["raft", "sna"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
   "timezone": "browser",
   "title": "Raft Overview",
   "uid": "raft-overview",
-  "version": 1,
-  "weekStart": ""
+  "version": 2
 }
