@@ -85,17 +85,20 @@ down and shows writes being rejected, `restore` brings everything back. See
 ## Repository layout
 
 ```text
-api/proto/raft/v1/raft.proto   gRPC contract, the source of truth for the wire format
-cmd/raftnode                   the node binary
-cmd/raftctl                    the CLI: write, read, delete, status, log, compare
-internal/raft                  consensus: election, replication, snapshots, client API
-internal/storage                SQLite store: log, metadata, state machine, snapshots
-internal/config                 environment configuration
-internal/metrics                Prometheus metrics
-internal/raftpb                 generated protobuf and gRPC code
-deployments/                    Prometheus, Loki, Promtail and Grafana configuration
-scripts/demo.sh                 start, workload, failover, crash, quorum loss, restore
-docs/                           documentation
+├── api/proto/raft/v1/raft.proto   gRPC contract, the source of truth for the wire format
+├── cmd/
+│   ├── raftnode/                  the node binary
+│   └── raftctl/                   the CLI: write, read, delete, status, log, compare
+├── internal/
+│   ├── raft/                      consensus: election, replication, snapshots, client API
+│   ├── storage/                   SQLite store: log, metadata, state machine, snapshots
+│   ├── config/                    environment configuration
+│   ├── metrics/                   Prometheus metrics
+│   └── raftpb/                    generated protobuf and gRPC code
+├── deployments/                   Prometheus, Loki, Promtail and Grafana configuration
+├── scripts/
+│   └── demo.sh                    start, workload, failover, crash, quorum loss, restore
+└── docs/                          documentation
 ```
 
 ## Configuration
@@ -165,10 +168,6 @@ replacement for etcd or Consul.
 - The state machine has two commands, `set` and `delete`, with string keys and values.
 - No TLS and no authentication, everything is plaintext gRPC on a trusted network.
 - Client writes are not deduplicated: a retried request may be applied twice.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
 
 Originally a university team project. This repository is the reworked version: the two
 implementations the team wrote were merged into one, the generated gRPC code is real

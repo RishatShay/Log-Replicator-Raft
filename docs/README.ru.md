@@ -87,17 +87,20 @@ go run ./cmd/raftctl compare
 ## Структура репозитория
 
 ```text
-api/proto/raft/v1/raft.proto   контракт gRPC, источник истины для формата обмена
-cmd/raftnode                   бинарь узла
-cmd/raftctl                    CLI: write, read, delete, status, log, compare
-internal/raft                  консенсус: выборы, репликация, снапшоты, клиентское API
-internal/storage                хранилище SQLite: лог, метаданные, машина состояний, снапшот
-internal/config                 конфигурация из переменных окружения
-internal/metrics                метрики Prometheus
-internal/raftpb                 сгенерированный код protobuf и gRPC
-deployments/                    конфигурация Prometheus, Loki, Promtail и Grafana
-scripts/demo.sh                 запуск, нагрузка, отказ лидера, падение узла, потеря кворума
-docs/                           документация
+├── api/proto/raft/v1/raft.proto   контракт gRPC, источник истины для формата обмена
+├── cmd/
+│   ├── raftnode/                  бинарь узла
+│   └── raftctl/                   CLI: write, read, delete, status, log, compare
+├── internal/
+│   ├── raft/                      консенсус: выборы, репликация, снапшоты, клиентское API
+│   ├── storage/                   хранилище SQLite: лог, метаданные, машина состояний, снапшот
+│   ├── config/                    конфигурация из переменных окружения
+│   ├── metrics/                   метрики Prometheus
+│   └── raftpb/                    сгенерированный код protobuf и gRPC
+├── deployments/                   конфигурация Prometheus, Loki, Promtail и Grafana
+├── scripts/
+│   └── demo.sh                    запуск, нагрузка, отказ лидера, падение узла, потеря кворума
+└── docs/                          документация
 ```
 
 ## Конфигурация
@@ -164,10 +167,6 @@ CI проверяет форматирование, go vet, тесты и дет
 - В машине состояний две команды, `set` и `delete`, со строковыми ключами и значениями.
 - Нет TLS и аутентификации: обычный gRPC в доверенной сети.
 - Запись не дедуплицируется: повторно отправленный запрос может примениться дважды.
-
-## Лицензия
-
-MIT, см. [LICENSE](../LICENSE).
 
 Изначально это был командный университетский проект. Здесь лежит переработанная версия: две
 реализации, которые сделала команда, объединены в одну, сгенерированный код gRPC настоящий, а
