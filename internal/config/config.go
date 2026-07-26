@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -62,10 +63,10 @@ func FromEnv() (Config, error) {
 
 	// A follower must be able to miss a few heartbeats before it calls an election.
 	if cfg.ElectionMin <= cfg.HeartbeatInterval {
-		return Config{}, fmt.Errorf("RAFT_ELECTION_MIN_MS must be greater than RAFT_HEARTBEAT_MS")
+		return Config{}, errors.New("RAFT_ELECTION_MIN_MS must be greater than RAFT_HEARTBEAT_MS")
 	}
 	if cfg.ElectionMax < cfg.ElectionMin {
-		return Config{}, fmt.Errorf("RAFT_ELECTION_MAX_MS must be greater than or equal to RAFT_ELECTION_MIN_MS")
+		return Config{}, errors.New("RAFT_ELECTION_MAX_MS must be greater than or equal to RAFT_ELECTION_MIN_MS")
 	}
 	return cfg, nil
 }
